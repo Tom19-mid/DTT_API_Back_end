@@ -195,80 +195,11 @@ public class AppointmentsController : ControllerBase
         try
         {
             var list = await _context.Appointments
-                .Where(a => a.PatientId == patientId || patientId <= 2)
+                .Where(a => a.PatientId == patientId)
                 .OrderByDescending(a => a.CreatedAt)
                 .ToListAsync();
 
-            var result = new List<AppointmentResponseDto>();
-            foreach (var appt in list)
-            {
-                var doctor = await _context.Doctors.FirstOrDefaultAsync(d => d.DoctorId == appt.DoctorId);
-                var specialty = doctor != null ? await _context.Specialties.FirstOrDefaultAsync(s => s.SpecialtyId == doctor.SpecialtyId) : null;
-
-                string specName = specialty?.SpecialtyName ?? (appt.Reason?.Contains("-") == true ? appt.Reason.Split('-')[0].Trim() : "Khám tổng quát");
-                string docName = doctor?.FullName ?? "BS. CKII Nguyễn Văn A";
-
-                bool isPkg = appt.Note?.Contains("Gói khám:") == true || docName == "Gói Khám Sức Khỏe" || appt.Reason?.Contains("Tầm soát") == true || appt.Reason?.Contains("Khám Tổng Quát") == true;
-
-                // Extract fee from Note if available (e.g. "Gói khám: ... | 2.500.000đ | ..." or "BS ... | 300.000đ")
-                string feeStr = "250.000đ";
-                if (!string.IsNullOrEmpty(appt.Note) && appt.Note.Contains("|"))
-                {
-                    var parts = appt.Note.Split('|');
-                    foreach (var p in parts)
-                    {
-                        if (p.Trim().EndsWith("đ") || p.Trim().EndsWith("VNĐ") || p.Trim().Contains(".000"))
-                        {
-                            feeStr = p.Trim();
-                            break;
-                        }
-                    }
-                }
-
-                if (isPkg)
-                {
-                    if (appt.Reason?.Contains("-") == true)
-                    {
-                        specName = appt.Reason.Split('-')[0].Trim();
-                    }
-                    else
-                    {
-                        specName = "Gói Khám Sức Khỏe";
-                    }
-                    docName = ""; // Hide doctor for health packages
-                }
-
-                string dateStr = appt.CreatedAt.ToString("dd/MM/yyyy");
-                string timeStr = "08:30 - 09:30";
-
-                if (!string.IsNullOrEmpty(appt.Reason) && appt.Reason.Contains("/"))
-                {
-                    var dateMatch = System.Text.RegularExpressions.Regex.Match(appt.Reason, @"(\d{1,2}/\d{1,2}/\d{4})");
-                    if (dateMatch.Success) dateStr = dateMatch.Value;
-
-                    var timeMatch = System.Text.RegularExpressions.Regex.Match(appt.Reason, @"(\d{1,2}:\d{2}\s*-\s*\d{1,2}:\d{2})");
-                    if (timeMatch.Success) timeStr = timeMatch.Value;
-                }
-
-                result.Add(new AppointmentResponseDto
-                {
-                    AppointmentId = appt.AppointmentId,
-                    PatientId = appt.PatientId,
-                    DoctorId = appt.DoctorId,
-                    DoctorName = docName,
-                    SpecialtyName = specName,
-                    Date = dateStr,
-                    TimeSlot = timeStr,
-                    Status = appt.StatusId == 1 ? "Confirmed" : appt.StatusId == 2 ? "Completed" : "Cancelled",
-                    QueueNumber = appt.QueueNumber,
-                    ClinicRoom = isPkg ? "" : (doctor?.ClinicRoom ?? "Phòng 101"),
-                    Fee = feeStr,
-                    IsPackage = isPkg,
-                    CreatedAt = appt.CreatedAt
-                });
-            }
-
-            return Ok(result);
+            return Ok(await FormatAppointmentListAsync(list));
         }
         catch (Exception ex)
         {
@@ -280,10 +211,92 @@ public class AppointmentsController : ControllerBase
     [HttpGet]
     public async Task<IActionResult> GetAllAppointments()
     {
-        var list = await _context.Appointments
-            .OrderByDescending(a => a.CreatedAt)
-            .ToListAsync();
-        return Ok(list);
+        try
+        {
+            var list = await _context.Appointments
+                .OrderByDescending(a => a.CreatedAt)
+                .ToListAsync();
+
+            return Ok(await FormatAppointmentListAsync(list));
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine("GetAllAppointments error: " + ex.Message);
+            return Ok(new List<AppointmentResponseDto>());
+        }
+    }
+
+    private async Task<List<AppointmentResponseDto>> FormatAppointmentListAsync(List<Appointment> list)
+    {
+        var result = new List<AppointmentResponseDto>();
+        foreach (var appt in list)
+        {
+            var doctor = await _context.Doctors.FirstOrDefaultAsync(d => d.DoctorId == appt.DoctorId);
+            var specialty = doctor != null ? await _context.Specialties.FirstOrDefaultAsync(s => s.SpecialtyId == doctor.SpecialtyId) : null;
+
+            string specName = specialty?.SpecialtyName ?? (appt.Reason?.Contains("-") == true ? appt.Reason.Split('-')[0].Trim() : "Khám tổng quát");
+            string docName = doctor?.FullName ?? "BS. CKII Nguyễn Văn A";
+
+            bool isPkg = appt.Note?.Contains("Gói khám:") == true || docName == "Gói Khám Sức Khỏe" || appt.Reason?.Contains("Tầm soát") == true || appt.Reason?.Contains("Khám Tổng Quát") == true;
+
+            // Extract fee from Note if available
+            string feeStr = "250.000đ";
+            if (!string.IsNullOrEmpty(appt.Note) && appt.Note.Contains("|"))
+            {
+                var parts = appt.Note.Split('|');
+                foreach (var p in parts)
+                {
+                    if (p.Trim().EndsWith("đ") || p.Trim().EndsWith("VNĐ") || p.Trim().Contains(".000"))
+                    {
+                        feeStr = p.Trim();
+                        break;
+                    }
+                }
+            }
+
+            if (isPkg)
+            {
+                if (appt.Reason?.Contains("-") == true)
+                {
+                    specName = appt.Reason.Split('-')[0].Trim();
+                }
+                else
+                {
+                    specName = "Gói Khám Sức Khỏe";
+                }
+                docName = ""; // Hide doctor for health packages
+            }
+
+            string dateStr = appt.CreatedAt.ToString("dd/MM/yyyy");
+            string timeStr = "08:30 - 09:30";
+
+            if (!string.IsNullOrEmpty(appt.Reason) && appt.Reason.Contains("/"))
+            {
+                var dateMatch = System.Text.RegularExpressions.Regex.Match(appt.Reason, @"(\d{1,2}/\d{1,2}/\d{4})");
+                if (dateMatch.Success) dateStr = dateMatch.Value;
+
+                var timeMatch = System.Text.RegularExpressions.Regex.Match(appt.Reason, @"(\d{1,2}:\d{2}\s*-\s*\d{1,2}:\d{2})");
+                if (timeMatch.Success) timeStr = timeMatch.Value;
+            }
+
+            result.Add(new AppointmentResponseDto
+            {
+                AppointmentId = appt.AppointmentId,
+                PatientId = appt.PatientId,
+                DoctorId = appt.DoctorId,
+                DoctorName = docName,
+                SpecialtyName = specName,
+                Date = dateStr,
+                TimeSlot = timeStr,
+                Status = appt.StatusId == 1 ? "Confirmed" : appt.StatusId == 2 ? "Completed" : "Cancelled",
+                QueueNumber = appt.QueueNumber,
+                ClinicRoom = isPkg ? "" : (doctor?.ClinicRoom ?? "Phòng 101"),
+                Fee = feeStr,
+                IsPackage = isPkg,
+                CreatedAt = appt.CreatedAt
+            });
+        }
+        return result;
     }
 
     [HttpPut("{id}/cancel")]

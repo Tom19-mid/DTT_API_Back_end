@@ -222,6 +222,12 @@ public class Doctor
     [StringLength(50)]
     public string? ClinicRoom { get; set; }
 
+    [Column("leave_start_date")]
+    public DateOnly? LeaveStartDate { get; set; }
+
+    [Column("leave_end_date")]
+    public DateOnly? LeaveEndDate { get; set; }
+
     [Column("avatar_url")]
     public string? AvatarUrl { get; set; }
 
@@ -273,8 +279,14 @@ public class Appointment
     [Column("cancelled_by")]
     public Guid? CancelledBy { get; set; }
 
+    [Column("is_active")]
+    public bool IsActive { get; set; } = true;
+
     [Column("created_at")]
     public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
+
+    [Column("updated_at")]
+    public DateTime UpdatedAt { get; set; } = DateTime.UtcNow;
 }
 
 [Table("appointment_statuses")]
@@ -323,9 +335,18 @@ public class MedicalRecord
     [Column("examination_date")]
     public DateTime ExaminationDate { get; set; }
 
+    [Column("re_examination_date")]
+    public DateOnly? ReExaminationDate { get; set; }
+
     [Column("status")]
     [StringLength(30)]
     public string Status { get; set; } = "Draft";
+
+    [Column("created_at")]
+    public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
+
+    [Column("updated_at")]
+    public DateTime UpdatedAt { get; set; } = DateTime.UtcNow;
 }
 
 [Table("medical_tests")]
@@ -363,6 +384,15 @@ public class MedicalTest
 
     [Column("performed_at")]
     public DateTime PerformedAt { get; set; } = DateTime.UtcNow;
+
+    [Column("result_file_url")]
+    public string? ResultFileUrl { get; set; }
+
+    [Column("created_at")]
+    public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
+
+    [Column("updated_at")]
+    public DateTime UpdatedAt { get; set; } = DateTime.UtcNow;
 }
 
 [Table("ultrasound_results")]
@@ -385,8 +415,17 @@ public class UltrasoundResult
     [Column("conclusion")]
     public string? Conclusion { get; set; }
 
+    [Column("image_urls", TypeName = "text[]")]
+    public string[]? ImageUrls { get; set; }
+
     [Column("performed_at")]
     public DateTime PerformedAt { get; set; } = DateTime.UtcNow;
+
+    [Column("created_at")]
+    public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
+
+    [Column("updated_at")]
+    public DateTime UpdatedAt { get; set; } = DateTime.UtcNow;
 }
 
 [Table("invoices")]
@@ -418,6 +457,12 @@ public class Invoice
 
     [Column("invoice_date")]
     public DateTime InvoiceDate { get; set; } = DateTime.UtcNow;
+
+    [Column("created_at")]
+    public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
+
+    [Column("updated_at")]
+    public DateTime UpdatedAt { get; set; } = DateTime.UtcNow;
 }
 
 [Table("notifications")]
@@ -443,6 +488,16 @@ public class Notification
 
     [Column("is_read")]
     public bool IsRead { get; set; } = false;
+
+    [Column("related_id")]
+    public int? RelatedId { get; set; }
+
+    [Column("related_type")]
+    [StringLength(50)]
+    public string? RelatedType { get; set; }
+
+    [Column("read_at")]
+    public DateTime? ReadAt { get; set; }
 
     [Column("created_at")]
     public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
@@ -512,4 +567,195 @@ public class HealthPackageDetail
     // Navigation
     [ForeignKey("PackageId")]
     public HealthPackage? Package { get; set; }
+}
+
+// ── Invoice Items ──────────────────────────────────────────────────────────────
+
+[Table("invoice_items")]
+public class InvoiceItem
+{
+    [Key]
+    [Column("item_id")]
+    public int ItemId { get; set; }
+
+    [Column("invoice_id")]
+    public int InvoiceId { get; set; }
+
+    [Required]
+    [Column("item_name")]
+    [StringLength(255)]
+    public string ItemName { get; set; } = string.Empty;
+
+    [Column("item_type")]
+    [StringLength(50)]
+    public string? ItemType { get; set; }
+
+    [Column("quantity")]
+    public int Quantity { get; set; } = 1;
+
+    [Column("unit_price")]
+    public decimal UnitPrice { get; set; }
+
+    [Column("amount")]
+    public decimal Amount { get; set; }
+
+    [Column("created_at")]
+    public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
+
+    [Column("updated_at")]
+    public DateTime UpdatedAt { get; set; } = DateTime.UtcNow;
+}
+
+// ── Medicines ─────────────────────────────────────────────────────────────────
+
+[Table("medicine_categories")]
+public class MedicineCategory
+{
+    [Key]
+    [Column("category_id")]
+    public int CategoryId { get; set; }
+
+    [Required]
+    [Column("category_name")]
+    [StringLength(100)]
+    public string CategoryName { get; set; } = string.Empty;
+
+    [Column("description")]
+    public string? Description { get; set; }
+
+    [Column("status")]
+    [StringLength(20)]
+    public string Status { get; set; } = "Active";
+
+    [Column("created_at")]
+    public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
+
+    [Column("updated_at")]
+    public DateTime UpdatedAt { get; set; } = DateTime.UtcNow;
+}
+
+[Table("medicines")]
+public class Medicine
+{
+    [Key]
+    [Column("medicine_id")]
+    public int MedicineId { get; set; }
+
+    [Column("category_id")]
+    public int CategoryId { get; set; }
+
+    [Required]
+    [Column("medicine_name")]
+    [StringLength(255)]
+    public string MedicineName { get; set; } = string.Empty;
+
+    [Required]
+    [Column("unit")]
+    [StringLength(50)]
+    public string Unit { get; set; } = string.Empty;
+
+    [Column("description")]
+    public string? Description { get; set; }
+
+    [Column("default_usage")]
+    public string? DefaultUsage { get; set; }
+
+    [Column("status")]
+    [StringLength(20)]
+    public string Status { get; set; } = "Active";
+
+    [Column("created_at")]
+    public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
+
+    [Column("updated_at")]
+    public DateTime UpdatedAt { get; set; } = DateTime.UtcNow;
+}
+
+// ── Prescriptions ─────────────────────────────────────────────────────────────
+
+[Table("prescriptions")]
+public class Prescription
+{
+    [Key]
+    [Column("prescription_id")]
+    public int PrescriptionId { get; set; }
+
+    [Column("medical_record_id")]
+    public int MedicalRecordId { get; set; }
+
+    [Column("doctor_id")]
+    public int DoctorId { get; set; }
+
+    [Column("patient_id")]
+    public int PatientId { get; set; }
+
+    [Column("status")]
+    [StringLength(20)]
+    public string Status { get; set; } = "Active";
+
+    [Column("note")]
+    public string? Note { get; set; }
+
+    [Column("created_at")]
+    public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
+
+    [Column("updated_at")]
+    public DateTime UpdatedAt { get; set; } = DateTime.UtcNow;
+
+    // Navigation
+    public List<PrescriptionDetail> Details { get; set; } = new();
+}
+
+[Table("prescription_details")]
+public class PrescriptionDetail
+{
+    [Key]
+    [Column("prescription_detail_id")]
+    public int PrescriptionDetailId { get; set; }
+
+    [Column("prescription_id")]
+    public int PrescriptionId { get; set; }
+
+    [Column("medicine_id")]
+    public int MedicineId { get; set; }
+
+    [Required]
+    [Column("medicine_name_snapshot")]
+    [StringLength(255)]
+    public string MedicineNameSnapshot { get; set; } = string.Empty;
+
+    [Required]
+    [Column("unit_snapshot")]
+    [StringLength(50)]
+    public string UnitSnapshot { get; set; } = string.Empty;
+
+    [Column("quantity")]
+    public int Quantity { get; set; }
+
+    [Required]
+    [Column("dosage")]
+    [StringLength(100)]
+    public string Dosage { get; set; } = string.Empty;
+
+    [Required]
+    [Column("frequency")]
+    [StringLength(100)]
+    public string Frequency { get; set; } = string.Empty;
+
+    [Required]
+    [Column("duration")]
+    [StringLength(100)]
+    public string Duration { get; set; } = string.Empty;
+
+    [Column("usage_instruction")]
+    public string? UsageInstruction { get; set; }
+
+    [Column("note")]
+    public string? Note { get; set; }
+
+    [Column("created_at")]
+    public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
+
+    [Column("updated_at")]
+    public DateTime UpdatedAt { get; set; } = DateTime.UtcNow;
 }

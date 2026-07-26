@@ -20,44 +20,20 @@ public class DoctorsController : ControllerBase
     [HttpGet]
     public async Task<IActionResult> GetDoctors([FromQuery] int? specialtyId)
     {
-        // 1. Ensure Specialties table is seeded with all 8 standard hospital specialties
-        var specCount = await _context.Specialties.CountAsync();
-        if (specCount < 8)
+        // 0. Auto-cleanup duplicate doctor records (e.g., duplicate Trần Văn C)
+        var dupeExists = await _context.Doctors.AnyAsync(d => d.FullName == "ThS. BS Trần Văn C" && d.DoctorId != 3);
+        if (dupeExists)
         {
-            var defaults = new[]
+            try
             {
-                new Specialty { SpecialtyId = 1, SpecialtyName = "Nội tổng quát", Description = "Khám bệnh nội khoa chung", Status = true },
-                new Specialty { SpecialtyId = 2, SpecialtyName = "Nhi khoa", Description = "Chăm sóc sức khỏe trẻ em", Status = true },
-                new Specialty { SpecialtyId = 3, SpecialtyName = "Sản phụ khoa", Description = "Khám thai và bệnh phụ khoa", Status = true },
-                new Specialty { SpecialtyId = 4, SpecialtyName = "Cơ xương khớp", Description = "Điều trị bệnh cơ xương khớp", Status = true },
-                new Specialty { SpecialtyId = 5, SpecialtyName = "Tim mạch", Description = "Khám và điều trị bệnh tim mạch", Status = true },
-                new Specialty { SpecialtyId = 6, SpecialtyName = "Thần kinh", Description = "Tầm soát bệnh lý thần kinh", Status = true },
-                new Specialty { SpecialtyId = 7, SpecialtyName = "Da liễu", Description = "Khám và điều trị bệnh da liễu", Status = true },
-                new Specialty { SpecialtyId = 8, SpecialtyName = "Chẩn đoán hình ảnh", Description = "Siêu âm, X-quang, chụp CT scanner", Status = true }
-            };
-            foreach (var sp in defaults)
-            {
-                if (!await _context.Specialties.AnyAsync(s => s.SpecialtyId == sp.SpecialtyId))
-                {
-                    _context.Specialties.Add(sp);
-                }
+                await _context.Database.ExecuteSqlRawAsync("DELETE FROM doctor_schedule_slots WHERE schedule_id IN (SELECT schedule_id FROM doctor_schedules WHERE doctor_id IN (SELECT doctor_id FROM doctors WHERE full_name = 'ThS. BS Trần Văn C' AND doctor_id <> 3));");
+                await _context.Database.ExecuteSqlRawAsync("DELETE FROM doctor_schedules WHERE doctor_id IN (SELECT doctor_id FROM doctors WHERE full_name = 'ThS. BS Trần Văn C' AND doctor_id <> 3);");
+                await _context.Database.ExecuteSqlRawAsync("DELETE FROM appointments WHERE doctor_id IN (SELECT doctor_id FROM doctors WHERE full_name = 'ThS. BS Trần Văn C' AND doctor_id <> 3);");
+                await _context.Database.ExecuteSqlRawAsync("DELETE FROM doctors WHERE full_name = 'ThS. BS Trần Văn C' AND doctor_id <> 3;");
             }
-            await _context.SaveChangesAsync();
+            catch { }
         }
 
-        // 2. Ensure Roles table has entries
-        var roleCount = await _context.Roles.CountAsync();
-        if (roleCount == 0)
-        {
-            _context.Roles.AddRange(
-                new Role { RoleId = 1, RoleName = "Patient", Description = "Bệnh nhân" },
-                new Role { RoleId = 2, RoleName = "Doctor", Description = "Bác sĩ" },
-                new Role { RoleId = 3, RoleName = "Admin", Description = "Quản trị viên" }
-            );
-            await _context.SaveChangesAsync();
-        }
-
-        // 3. Seed 10 realistic specialist doctors covering all 8 specialties
         var doctorMasterList = new[]
         {
             new { Name = "BS. CKII Nguyễn Văn A", Degree = "Chuyên khoa II Nội tổng quát", Exp = 15, Room = "Phòng 101", Rating = 4.9m, Reviews = 145, Phone = "0901111111", Email = "doctor1@gmail.com", SpecId = 1, WorkingDays = "Thứ Hai, Tư, Sáu & Chủ Nhật" },
@@ -72,61 +48,89 @@ public class DoctorsController : ControllerBase
             new { Name = "ThS. BS Nguyễn Mai Chi", Degree = "Thạc sĩ Chuyên khoa Nhi", Exp = 8, Room = "Phòng 104", Rating = 4.9m, Reviews = 88, Phone = "0910000000", Email = "doctor10@gmail.com", SpecId = 2, WorkingDays = "Thứ Hai, Tư, Sáu, Bảy" }
         };
 
-        foreach (var doc in doctorMasterList)
+        // Only perform heavy DB seeding (150+ SQL queries) if database is completely empty
+        if (!await _context.Doctors.AnyAsync())
         {
-            var existingUser = await _context.Users.FirstOrDefaultAsync(u => u.PhoneNumber == doc.Phone || u.Email == doc.Email);
-            User user;
-            if (existingUser == null)
+            var specCount = await _context.Specialties.CountAsync();
+            if (specCount < 8)
             {
-                user = new User
+                var defaults = new[]
                 {
-                    UserId = Guid.NewGuid(),
-                    PhoneNumber = doc.Phone,
-                    Email = doc.Email,
-                    PasswordHash = BCrypt.Net.BCrypt.HashPassword("Doctor@123"),
-                    RoleId = 2,
-                    Status = "Active"
+                    new Specialty { SpecialtyId = 1, SpecialtyName = "Nội tổng quát", Description = "Khám bệnh nội khoa chung", Status = true },
+                    new Specialty { SpecialtyId = 2, SpecialtyName = "Nhi khoa", Description = "Chăm sóc sức khỏe trẻ em", Status = true },
+                    new Specialty { SpecialtyId = 3, SpecialtyName = "Sản phụ khoa", Description = "Khám thai và bệnh phụ khoa", Status = true },
+                    new Specialty { SpecialtyId = 4, SpecialtyName = "Cơ xương khớp", Description = "Điều trị bệnh cơ xương khớp", Status = true },
+                    new Specialty { SpecialtyId = 5, SpecialtyName = "Tim mạch", Description = "Khám và điều trị bệnh tim mạch", Status = true },
+                    new Specialty { SpecialtyId = 6, SpecialtyName = "Thần kinh", Description = "Tầm soát bệnh lý thần kinh", Status = true },
+                    new Specialty { SpecialtyId = 7, SpecialtyName = "Da liễu", Description = "Khám và điều trị bệnh da liễu", Status = true },
+                    new Specialty { SpecialtyId = 8, SpecialtyName = "Chẩn đoán hình ảnh", Description = "Siêu âm, X-quang, chụp CT scanner", Status = true }
                 };
-                _context.Users.Add(user);
+                foreach (var sp in defaults)
+                {
+                    if (!await _context.Specialties.AnyAsync(s => s.SpecialtyId == sp.SpecialtyId))
+                    {
+                        _context.Specialties.Add(sp);
+                    }
+                }
                 await _context.SaveChangesAsync();
-            }
-            else
-            {
-                user = existingUser;
             }
 
-            var existingDoc = await _context.Doctors.FirstOrDefaultAsync(d => d.UserId == user.UserId || (d.FullName != null && d.FullName.Contains(doc.Name.Substring(doc.Name.LastIndexOf(' ') + 1))));
-            if (existingDoc == null)
+            var roleCount = await _context.Roles.CountAsync();
+            if (roleCount == 0)
             {
-                var newDoc = new Doctor
-                {
-                    UserId = user.UserId,
-                    FullName = doc.Name,
-                    Degree = doc.Degree,
-                    ExperienceYears = doc.Exp,
-                    ClinicRoom = doc.Room,
-                    Rating = doc.Rating,
-                    ReviewCount = doc.Reviews,
-                    SpecialtyId = doc.SpecId,
-                    Status = "Active"
-                };
-                _context.Doctors.Add(newDoc);
+                _context.Roles.AddRange(
+                    new Role { RoleId = 1, RoleName = "Patient", Description = "Bệnh nhân" },
+                    new Role { RoleId = 2, RoleName = "Doctor", Description = "Bác sĩ" },
+                    new Role { RoleId = 3, RoleName = "Admin", Description = "Quản trị viên" }
+                );
                 await _context.SaveChangesAsync();
             }
-            else
+
+            foreach (var doc in doctorMasterList)
             {
-                // Sync properties for realism and specialty alignment
-                bool needsSave = false;
-                if (existingDoc.SpecialtyId != doc.SpecId) { existingDoc.SpecialtyId = doc.SpecId; needsSave = true; }
-                if (existingDoc.FullName != doc.Name) { existingDoc.FullName = doc.Name; needsSave = true; }
-                if (existingDoc.Degree != doc.Degree) { existingDoc.Degree = doc.Degree; needsSave = true; }
-                if (existingDoc.ClinicRoom != doc.Room) { existingDoc.ClinicRoom = doc.Room; needsSave = true; }
-                if (needsSave) await _context.SaveChangesAsync();
+                var existingUser = await _context.Users.FirstOrDefaultAsync(u => u.PhoneNumber == doc.Phone || u.Email == doc.Email);
+                User user;
+                if (existingUser == null)
+                {
+                    user = new User
+                    {
+                        UserId = Guid.NewGuid(),
+                        PhoneNumber = doc.Phone,
+                        Email = doc.Email,
+                        PasswordHash = BCrypt.Net.BCrypt.HashPassword("Doctor@123"),
+                        RoleId = 2,
+                        Status = "Active"
+                    };
+                    _context.Users.Add(user);
+                    await _context.SaveChangesAsync();
+                }
+                else
+                {
+                    user = existingUser;
+                }
+
+                var existingDoc = await _context.Doctors.FirstOrDefaultAsync(d => d.UserId == user.UserId || (d.FullName != null && d.FullName == doc.Name));
+                if (existingDoc == null)
+                {
+                    var newDoc = new Doctor
+                    {
+                        UserId = user.UserId,
+                        FullName = doc.Name,
+                        Degree = doc.Degree,
+                        ExperienceYears = doc.Exp,
+                        ClinicRoom = doc.Room,
+                        Rating = doc.Rating,
+                        ReviewCount = doc.Reviews,
+                        SpecialtyId = doc.SpecId,
+                        Status = "Active"
+                    };
+                    _context.Doctors.Add(newDoc);
+                    await _context.SaveChangesAsync();
+                }
             }
+
+            await SeedDoctorSchedulesAsync();
         }
-
-        // Auto-seed doctor working schedule shifts for 14 days
-        await SeedDoctorSchedulesAsync();
 
         var query = _context.Doctors.AsQueryable();
         if (specialtyId.HasValue && specialtyId.Value > 0)
@@ -157,10 +161,16 @@ public class DoctorsController : ControllerBase
         return Ok(result);
     }
 
+    private static bool _schedulesSeeded = false;
+
     [HttpGet("schedules")]
     public async Task<IActionResult> GetDoctorSchedules([FromQuery] int? doctorId, [FromQuery] int? specialtyId, [FromQuery] string? dateStr)
     {
-        await SeedDoctorSchedulesAsync();
+        if (!_schedulesSeeded)
+        {
+            await SeedDoctorSchedulesAsync();
+            _schedulesSeeded = true;
+        }
 
         var doctors = await _context.Doctors.ToListAsync();
 
@@ -263,6 +273,17 @@ public class DoctorsController : ControllerBase
             var conn = _context.Database.GetDbConnection();
             if (conn.State != ConnectionState.Open) await conn.OpenAsync();
 
+            using (var checkCmd = conn.CreateCommand())
+            {
+                checkCmd.CommandText = "SELECT COUNT(*) FROM doctor_schedules;";
+                var countObj = await checkCmd.ExecuteScalarAsync();
+                if (countObj != null && Convert.ToInt32(countObj) >= 10)
+                {
+                    _schedulesSeeded = true;
+                    return;
+                }
+            }
+
             var doctors = await _context.Doctors.ToListAsync();
             if (doctors.Count == 0) return;
 
@@ -295,19 +316,19 @@ public class DoctorsController : ControllerBase
             slotCmd.CommandText = @"
                 INSERT INTO doctor_schedule_slots (schedule_id, slot_order, start_time, end_time, status)
                 SELECT ds.schedule_id, 1, '07:30:00'::time, '08:30:00'::time, 'Available'
-                FROM doctor_schedules ds WHERE NOT EXISTS (SELECT 1 FROM doctor_schedule_slots dss WHERE dss.schedule_id = ds.schedule_id AND slot_order = 1);
+                FROM doctor_schedules ds WHERE NOT EXISTS (SELECT 1 FROM doctor_schedule_slots dss WHERE dss.schedule_id = ds.schedule_id AND (slot_order = 1 OR start_time = '07:30:00'::time));
 
                 INSERT INTO doctor_schedule_slots (schedule_id, slot_order, start_time, end_time, status)
                 SELECT ds.schedule_id, 2, '08:30:00'::time, '09:30:00'::time, 'Available'
-                FROM doctor_schedules ds WHERE NOT EXISTS (SELECT 1 FROM doctor_schedule_slots dss WHERE dss.schedule_id = ds.schedule_id AND slot_order = 2);
+                FROM doctor_schedules ds WHERE NOT EXISTS (SELECT 1 FROM doctor_schedule_slots dss WHERE dss.schedule_id = ds.schedule_id AND (slot_order = 2 OR start_time = '08:30:00'::time));
 
                 INSERT INTO doctor_schedule_slots (schedule_id, slot_order, start_time, end_time, status)
                 SELECT ds.schedule_id, 3, '13:30:00'::time, '14:30:00'::time, 'Available'
-                FROM doctor_schedules ds WHERE NOT EXISTS (SELECT 1 FROM doctor_schedule_slots dss WHERE dss.schedule_id = ds.schedule_id AND slot_order = 3);
+                FROM doctor_schedules ds WHERE NOT EXISTS (SELECT 1 FROM doctor_schedule_slots dss WHERE dss.schedule_id = ds.schedule_id AND (slot_order = 3 OR start_time = '13:30:00'::time));
 
                 INSERT INTO doctor_schedule_slots (schedule_id, slot_order, start_time, end_time, status)
                 SELECT ds.schedule_id, 4, '15:30:00'::time, '16:30:00'::time, 'Available'
-                FROM doctor_schedules ds WHERE NOT EXISTS (SELECT 1 FROM doctor_schedule_slots dss WHERE dss.schedule_id = ds.schedule_id AND slot_order = 4);";
+                FROM doctor_schedules ds WHERE NOT EXISTS (SELECT 1 FROM doctor_schedule_slots dss WHERE dss.schedule_id = ds.schedule_id AND (slot_order = 4 OR start_time = '15:30:00'::time));";
             await slotCmd.ExecuteNonQueryAsync();
         }
         catch (Exception ex)

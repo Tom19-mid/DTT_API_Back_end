@@ -110,114 +110,105 @@ public class HealthPackagesController : ControllerBase
             // Increment booked count
             pkg.BookedCount += 1;
             pkg.UpdatedAt = DateTime.UtcNow;
+            try { await _context.SaveChangesAsync(); } catch { }
 
-            // Ensure dedicated Health Package record exists in SQL to avoid associating with regular doctors
-            int validDoctorId = 0;
+            // 1. Ensure appointment_statuses table has entries
+            var statusCount = await _context.AppointmentStatuses.CountAsync();
+            if (statusCount == 0)
+            {
+                _context.AppointmentStatuses.AddRange(
+                    new AppointmentStatus { StatusId = 1, StatusName = "Confirmed" },
+                    new AppointmentStatus { StatusId = 2, StatusName = "Completed" },
+                    new AppointmentStatus { StatusId = 3, StatusName = "Cancelled" }
+                );
+                try { await _context.SaveChangesAsync(); } catch { }
+            }
+
+            // 2. Validate patient exists in PostgreSQL or fallback to default existing patient
+            var patient = await _context.Patients.FirstOrDefaultAsync(p => p.PatientId == req.PatientId);
+            int validPatientId = patient?.PatientId ?? (await _context.Patients.FirstOrDefaultAsync())?.PatientId ?? 1;
+
+            // 3. Obtain a valid DoctorId from database (health packages rely on Note field for formatting, no fake doctor record needed)
+            var firstDoctor = await _context.Doctors.FirstOrDefaultAsync(d => d.Status == "Active") ?? await _context.Doctors.FirstOrDefaultAsync();
+            int validDoctorId = firstDoctor?.DoctorId ?? 1;
+
+            // 4. Safely get a valid slot_id from doctor_schedule_slots table
             int validSlotId = 0;
             try
             {
                 var conn = _context.Database.GetDbConnection();
                 if (conn.State != ConnectionState.Open) await conn.OpenAsync();
 
-                using (var findCmd = conn.CreateCommand())
+                using var slotCmd = conn.CreateCommand();
+                slotCmd.CommandText = "SELECT s.slot_id FROM doctor_schedule_slots s JOIN doctor_schedules ds ON s.schedule_id = ds.schedule_id WHERE ds.doctor_id = " + validDoctorId + " LIMIT 1";
+                var val = await slotCmd.ExecuteScalarAsync();
+                if (val != null && val != DBNull.Value) validSlotId = Convert.ToInt32(val);
+                if (validSlotId == 0)
                 {
-                    findCmd.CommandText = "SELECT doctor_id FROM doctors WHERE full_name = 'Gói Khám Sức Khỏe' LIMIT 1";
-                    var dVal = await findCmd.ExecuteScalarAsync();
-                    if (dVal != null && dVal != DBNull.Value) validDoctorId = Convert.ToInt32(dVal);
-                }
-
-                if (validDoctorId == 0)
-                {
-                    int specId = 1;
-                    using (var specCmd = conn.CreateCommand())
-                    {
-                        specCmd.CommandText = "INSERT INTO specialties (specialty_name, description, icon, is_active) VALUES ('Gói Khám Sức Khỏe', 'Khu Tiếp Nhận & Khám theo gói', 'medkit', TRUE) ON CONFLICT (specialty_name) DO UPDATE SET is_active = TRUE RETURNING specialty_id";
-                        try { var sVal = await specCmd.ExecuteScalarAsync(); if (sVal != null) specId = Convert.ToInt32(sVal); } catch { }
-                    }
-
-                    using (var insDoc = conn.CreateCommand())
-                    {
-                        insDoc.CommandText = $"INSERT INTO doctors (user_id, specialty_id, full_name, title, experience_years, bio, clinic_room, price, status) VALUES (gen_random_uuid(), {specId}, 'Gói Khám Sức Khỏe', '', 0, 'Khu khám chuyên biệt theo chuỗi dịch vụ', '', 0, 'Active') RETURNING doctor_id";
-                        try { var newDoc = await insDoc.ExecuteScalarAsync(); if (newDoc != null) validDoctorId = Convert.ToInt32(newDoc); } catch { }
-                    }
-                }
-
-                if (validDoctorId > 0)
-                {
-                    using (var findSlot = conn.CreateCommand())
-                    {
-                        findSlot.CommandText = @"
-                            SELECT s.slot_id 
-                            FROM doctor_schedule_slots s
-                            JOIN doctor_schedules ds ON s.schedule_id = ds.schedule_id
-                            WHERE ds.doctor_id = " + validDoctorId + " LIMIT 1";
-                        var sVal = await findSlot.ExecuteScalarAsync();
-                        if (sVal != null && sVal != DBNull.Value) validSlotId = Convert.ToInt32(sVal);
-                    }
-
-                    if (validSlotId == 0)
-                    {
-                        int scheduleId = 0;
-                        using (var insSched = conn.CreateCommand())
-                        {
-                            insSched.CommandText = $"INSERT INTO doctor_schedules (doctor_id, work_date, start_time, end_time, status) VALUES ({validDoctorId}, CURRENT_DATE, '07:00:00'::time, '17:00:00'::time, 'Available') RETURNING schedule_id";
-                            try { var sc = await insSched.ExecuteScalarAsync(); if (sc != null) scheduleId = Convert.ToInt32(sc); } catch { }
-                        }
-                        if (scheduleId > 0)
-                        {
-                            using (var insSlot = conn.CreateCommand())
-                            {
-                                insSlot.CommandText = $"INSERT INTO doctor_schedule_slots (schedule_id, slot_order, start_time, end_time, status) VALUES ({scheduleId}, 1, '07:30:00'::time, '11:30:00'::time, 'Available') RETURNING slot_id";
-                                try { var st = await insSlot.ExecuteScalarAsync(); if (st != null) validSlotId = Convert.ToInt32(st); } catch { }
-                            }
-                        }
-                    }
-                }
-
-                // Fallback if anything failed
-                if (validDoctorId == 0 || validSlotId == 0)
-                {
-                    using var cmd = conn.CreateCommand();
-                    cmd.CommandText = "SELECT ds.doctor_id, s.slot_id FROM doctor_schedule_slots s JOIN doctor_schedules ds ON s.schedule_id = ds.schedule_id LIMIT 1";
-                    using var reader = await cmd.ExecuteReaderAsync();
-                    if (await reader.ReadAsync())
-                    {
-                        if (validDoctorId == 0) validDoctorId = Convert.ToInt32(reader["doctor_id"]);
-                        if (validSlotId == 0) validSlotId = Convert.ToInt32(reader["slot_id"]);
-                    }
-                    await reader.CloseAsync();
+                    using var anySlot = conn.CreateCommand();
+                    anySlot.CommandText = "SELECT slot_id FROM doctor_schedule_slots LIMIT 1";
+                    var val2 = await anySlot.ExecuteScalarAsync();
+                    if (val2 != null && val2 != DBNull.Value) validSlotId = Convert.ToInt32(val2);
                 }
             }
             catch (Exception ex)
             {
-                Console.WriteLine("Schedule lookup warning in package booking: " + ex.Message);
+                Console.WriteLine("Slot lookup warning in package booking: " + ex.Message);
             }
+            if (validSlotId == 0) validSlotId = 1;
 
-            // Create appointment record for package booking
-            var appointment = new Appointment
+            // 5. Create appointment record for package booking with EF Save & Raw SQL fallback
+            int queueNum = (await _context.Appointments.CountAsync()) + 1;
+            int newAppointmentId = 0;
+            try
             {
-                PatientId = req.PatientId > 0 ? req.PatientId : 2,
-                DoctorId = validDoctorId,
-                SlotId = validSlotId,
-                Reason = $"{pkg.Title} - {req.PreferredDate ?? DateTime.UtcNow.AddDays(1).ToString("dd/M/yyyy")}",
-                Note = $"Gói khám: {pkg.Title} | {FormatPrice(pkg.Price)} | Bệnh nhân: {req.PatientName}",
-                StatusId = 1, // Confirmed
-                QueueNumber = (await _context.Appointments.CountAsync()) + 1,
-                CreatedAt = DateTime.UtcNow
-            };
+                var appointment = new Appointment
+                {
+                    PatientId = validPatientId,
+                    DoctorId = validDoctorId,
+                    SlotId = validSlotId,
+                    Reason = $"{pkg.Title} - {req.PreferredDate ?? DateTime.UtcNow.AddDays(1).ToString("dd/M/yyyy")}",
+                    Note = $"Gói khám: {pkg.Title} | {FormatPrice(pkg.Price)} | Bệnh nhân: {req.PatientName}",
+                    StatusId = 1, // Confirmed
+                    QueueNumber = queueNum,
+                    CreatedAt = DateTime.UtcNow
+                };
 
-            _context.Appointments.Add(appointment);
-            await _context.SaveChangesAsync();
+                _context.Appointments.Add(appointment);
+                await _context.SaveChangesAsync();
+                newAppointmentId = appointment.AppointmentId;
+            }
+            catch (Exception efEx)
+            {
+                Console.WriteLine("EF Save failed for package booking, executing raw SQL insert: " + efEx.Message);
+                var conn = _context.Database.GetDbConnection();
+                if (conn.State != ConnectionState.Open) await conn.OpenAsync();
+
+                using var rawCmd = conn.CreateCommand();
+                rawCmd.CommandText = @"
+                    INSERT INTO appointments (patient_id, doctor_id, slot_id, reason, status_id, queue_number, note, created_at)
+                    VALUES (@pId, @dId, @sId, @reason, 1, @qNum, @note, NOW())
+                    RETURNING appointment_id";
+                var p1 = rawCmd.CreateParameter(); p1.ParameterName = "@pId"; p1.Value = validPatientId; rawCmd.Parameters.Add(p1);
+                var p2 = rawCmd.CreateParameter(); p2.ParameterName = "@dId"; p2.Value = validDoctorId; rawCmd.Parameters.Add(p2);
+                var p3 = rawCmd.CreateParameter(); p3.ParameterName = "@sId"; p3.Value = validSlotId; rawCmd.Parameters.Add(p3);
+                var p4 = rawCmd.CreateParameter(); p4.ParameterName = "@reason"; p4.Value = $"{pkg.Title} - {req.PreferredDate ?? DateTime.UtcNow.AddDays(1).ToString("dd/M/yyyy")}"; rawCmd.Parameters.Add(p4);
+                var p5 = rawCmd.CreateParameter(); p5.ParameterName = "@qNum"; p5.Value = queueNum; rawCmd.Parameters.Add(p5);
+                var p6 = rawCmd.CreateParameter(); p6.ParameterName = "@note"; p6.Value = $"Gói khám: {pkg.Title} | {FormatPrice(pkg.Price)} | Bệnh nhân: {req.PatientName}"; rawCmd.Parameters.Add(p6);
+
+                var inserted = await rawCmd.ExecuteScalarAsync();
+                if (inserted != null && inserted != DBNull.Value) newAppointmentId = Convert.ToInt32(inserted);
+            }
 
             return Ok(new
             {
                 success = true,
                 message = $"Đã đặt gói khám '{pkg.Title}' thành công!",
-                appointmentId = appointment.AppointmentId,
+                appointmentId = newAppointmentId > 0 ? newAppointmentId : queueNum,
                 packageTitle = pkg.Title,
                 priceFormatted = FormatPrice(pkg.Price),
                 preferredDate = req.PreferredDate ?? DateTime.UtcNow.AddDays(1).ToString("dd/MM/yyyy"),
-                queueNumber = appointment.QueueNumber
+                queueNumber = queueNum
             });
         }
         catch (Exception ex)

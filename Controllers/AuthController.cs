@@ -100,7 +100,7 @@ public class AuthController : ControllerBase
             Email = dto.Email,
             PasswordHash = hashedPassword,
             RoleId = 1, // Role 1 = Patient
-            Status = "Active"
+            Status = "Active" // Must be Active to pass users_status_check constraint
         };
 
         _context.Users.Add(user);
@@ -121,6 +121,16 @@ public class AuthController : ControllerBase
 
         var token = GenerateJwtToken(user);
 
+        // 4. Generate & Log OTP for Registration
+        var otp = new Random().Next(100000, 999999).ToString();
+        _otpStore[dto.Phone] = (otp, DateTime.UtcNow.AddMinutes(5));
+
+        Console.WriteLine("\n╔═════════════════════════════════════════════════════════════════════╗");
+        Console.WriteLine($"║ 🔑 [DEMO ĐỒ ÁN TỐT NGHIỆP] MÃ OTP ĐĂNG KÝ TÀI KHOẢN: {otp}        ║");
+        Console.WriteLine($"║ 📱 Số điện thoại: {dto.Phone,-49} ║");
+        Console.WriteLine($"║ ⏳ Thời gian hiệu lực: 5 phút (đến {DateTime.Now.AddMinutes(5):HH:mm:ss})                      ║");
+        Console.WriteLine("╚═════════════════════════════════════════════════════════════════════╝\n");
+
         return Ok(new AuthResponseDto
         {
             Token = token,
@@ -129,7 +139,8 @@ public class AuthController : ControllerBase
             FullName = patient.FullName,
             Phone = user.PhoneNumber,
             Email = user.Email,
-            VerificationStatus = patient.VerificationStatus
+            VerificationStatus = patient.VerificationStatus,
+            OtpCode = otp
         });
     }
 
@@ -156,4 +167,210 @@ public class AuthController : ControllerBase
 
         return new JwtSecurityTokenHandler().WriteToken(token);
     }
+
+    // ── In-memory OTP store (phone -> (otp, expiry)) ──────────────────────────
+    // NOTE: In production, use Redis or DB-backed storage with proper TTL
+    private static readonly Dictionary<string, (string Code, DateTime Expiry)> _otpStore = new();
+
+    // POST /api/auth/send-otp — Tạo & gửi mã OTP (6 số) cho số điện thoại
+    [HttpPost("send-otp")]
+    public async Task<IActionResult> SendOtp([FromBody] SendOtpDto dto)
+    {
+        if (string.IsNullOrWhiteSpace(dto.Phone))
+            return BadRequest(new { success = false, message = "Vui lòng nhập số điện thoại." });
+
+        var user = await _context.Users.FirstOrDefaultAsync(u => u.PhoneNumber == dto.Phone);
+        if (user == null)
+            return NotFound(new { success = false, message = "Số điện thoại chưa được đăng ký trong hệ thống." });
+
+        // Generate 6-digit OTP
+        var otp = new Random().Next(100000, 999999).ToString();
+        _otpStore[dto.Phone] = (otp, DateTime.UtcNow.AddMinutes(5));
+
+        Console.WriteLine("\n╔═════════════════════════════════════════════════════════════════════╗");
+        Console.WriteLine($"║ 🔑 [DEMO ĐỒ ÁN TỐT NGHIỆP] MÃ OTP BỆNH NHÂN: {otp}                  ║");
+        Console.WriteLine($"║ 📱 Số điện thoại: {dto.Phone,-49} ║");
+        Console.WriteLine($"║ ⏳ Thời gian hiệu lực: 5 phút (đến {DateTime.Now.AddMinutes(5):HH:mm:ss})                      ║");
+        Console.WriteLine("╚═════════════════════════════════════════════════════════════════════╝\n");
+
+        // In production: integrate SMS gateway (Twilio, ESMS.vn, etc.)
+        // For now: return OTP in response body (dev/demo mode only)
+        return Ok(new
+        {
+            success = true,
+            message = $"Mã OTP đã được gửi đến số {dto.Phone}.",
+            otpCode = otp, // REMOVE in production!
+            expiresInSeconds = 300
+        });
+    }
+
+    // POST /api/auth/verify-otp — Xác minh mã OTP (dùng cho đăng ký / quên mật khẩu)
+    [HttpPost("verify-otp")]
+    public async Task<IActionResult> VerifyOtp([FromBody] VerifyOtpDto dto)
+    {
+        if (!_otpStore.TryGetValue(dto.Phone, out var entry))
+            return BadRequest(new { success = false, message = "Chưa có mã OTP cho số điện thoại này. Vui lòng gửi lại." });
+
+        if (DateTime.UtcNow > entry.Expiry)
+        {
+            _otpStore.Remove(dto.Phone);
+            return BadRequest(new { success = false, message = "Mã OTP đã hết hạn. Vui lòng gửi lại mã mới." });
+        }
+
+        if (entry.Code != dto.OtpCode)
+            return BadRequest(new { success = false, message = "Mã OTP không chính xác. Vui lòng kiểm tra lại." });
+
+        // Update user status & patient verification status in database upon OTP confirmation
+        var user = await _context.Users.FirstOrDefaultAsync(u => u.PhoneNumber == dto.Phone);
+        if (user != null)
+        {
+            user.Status = "Active";
+            var patient = await _context.Patients.FirstOrDefaultAsync(p => p.UserId == user.UserId);
+            if (patient != null)
+            {
+                patient.VerificationStatus = "verified";
+                patient.VerifiedAt = DateTime.UtcNow;
+            }
+            await _context.SaveChangesAsync();
+        }
+
+        return Ok(new { success = true, message = "Xác minh OTP thành công." });
+    }
+
+    // POST /api/auth/reset-password — Đặt lại mật khẩu sau khi xác minh OTP
+    [HttpPost("reset-password")]
+    public async Task<IActionResult> ResetPassword([FromBody] ResetPasswordDto dto)
+    {
+        // 1. Verify OTP is still valid
+        if (!_otpStore.TryGetValue(dto.Phone, out var entry))
+            return BadRequest(new { success = false, message = "Phiên xác minh OTP không hợp lệ. Vui lòng thực hiện lại." });
+
+        if (DateTime.UtcNow > entry.Expiry)
+        {
+            _otpStore.Remove(dto.Phone);
+            return BadRequest(new { success = false, message = "Mã OTP đã hết hạn. Vui lòng gửi lại mã mới." });
+        }
+
+        if (entry.Code != dto.OtpCode)
+            return BadRequest(new { success = false, message = "Mã OTP không chính xác." });
+
+        // 2. Find user and reset password
+        var user = await _context.Users.FirstOrDefaultAsync(u => u.PhoneNumber == dto.Phone);
+        if (user == null)
+            return NotFound(new { success = false, message = "Không tìm thấy tài khoản." });
+
+        if (string.IsNullOrWhiteSpace(dto.NewPassword) || dto.NewPassword.Length < 6)
+            return BadRequest(new { success = false, message = "Mật khẩu mới phải có ít nhất 6 ký tự." });
+
+        user.PasswordHash = BCrypt.Net.BCrypt.HashPassword(dto.NewPassword);
+        user.UpdatedAt = DateTime.UtcNow;
+        await _context.SaveChangesAsync();
+
+        // 3. Remove used OTP
+        _otpStore.Remove(dto.Phone);
+
+        return Ok(new { success = true, message = "Mật khẩu đã được đặt lại thành công. Vui lòng đăng nhập lại." });
+    }
+
+    // PUT /api/auth/profile — Cập nhật thông tin hồ sơ bệnh nhân
+    [HttpPut("profile")]
+    public async Task<IActionResult> UpdateProfile([FromBody] UpdateProfileDto dto)
+    {
+        try
+        {
+            var patient = await _context.Patients.FirstOrDefaultAsync(p => p.PatientId == dto.PatientId);
+            if (patient == null)
+                return NotFound(new { message = "Không tìm thấy hồ sơ bệnh nhân." });
+
+            if (!string.IsNullOrWhiteSpace(dto.FullName)) patient.FullName = dto.FullName;
+            if (!string.IsNullOrWhiteSpace(dto.Gender)) patient.Gender = dto.Gender;
+            if (!string.IsNullOrWhiteSpace(dto.Address)) patient.Address = dto.Address;
+            if (!string.IsNullOrWhiteSpace(dto.HealthInsuranceNumber)) patient.HealthInsuranceNumber = dto.HealthInsuranceNumber;
+            if (dto.DateOfBirth.HasValue) patient.DateOfBirth = dto.DateOfBirth;
+            patient.UpdatedAt = DateTime.UtcNow;
+
+            // Update email in users table if provided
+            if (!string.IsNullOrWhiteSpace(dto.Email))
+            {
+                var user = await _context.Users.FirstOrDefaultAsync(u => u.UserId == patient.UserId);
+                if (user != null)
+                {
+                    user.Email = dto.Email;
+                    user.UpdatedAt = DateTime.UtcNow;
+                }
+            }
+
+            await _context.SaveChangesAsync();
+            return Ok(new { success = true, message = "Cập nhật thông tin thành công.", fullName = patient.FullName });
+        }
+        catch (Exception ex)
+        {
+            return StatusCode(500, new { success = false, message = "Lỗi cập nhật: " + ex.Message });
+        }
+    }
+
+    // POST /api/auth/change-password — Đổi mật khẩu
+    [HttpPost("change-password")]
+    public async Task<IActionResult> ChangePassword([FromBody] ChangePasswordDto dto)
+    {
+        try
+        {
+            var user = await _context.Users.FirstOrDefaultAsync(u => u.PhoneNumber == dto.Phone);
+            if (user == null)
+                return NotFound(new { message = "Không tìm thấy tài khoản." });
+
+            bool isCurrentValid = false;
+            try { isCurrentValid = BCrypt.Net.BCrypt.Verify(dto.CurrentPassword, user.PasswordHash); }
+            catch { isCurrentValid = user.PasswordHash == dto.CurrentPassword; }
+
+            if (!isCurrentValid)
+                return BadRequest(new { success = false, message = "Mật khẩu hiện tại không chính xác." });
+
+            user.PasswordHash = BCrypt.Net.BCrypt.HashPassword(dto.NewPassword);
+            user.UpdatedAt = DateTime.UtcNow;
+            await _context.SaveChangesAsync();
+
+            return Ok(new { success = true, message = "Đổi mật khẩu thành công." });
+        }
+        catch (Exception ex)
+        {
+            return StatusCode(500, new { success = false, message = "Lỗi đổi mật khẩu: " + ex.Message });
+        }
+    }
+}
+
+public class UpdateProfileDto
+{
+    public int PatientId { get; set; }
+    public string? FullName { get; set; }
+    public string? Email { get; set; }
+    public string? Gender { get; set; }
+    public string? Address { get; set; }
+    public string? HealthInsuranceNumber { get; set; }
+    public DateTime? DateOfBirth { get; set; }
+}
+
+public class ChangePasswordDto
+{
+    public string Phone { get; set; } = string.Empty;
+    public string CurrentPassword { get; set; } = string.Empty;
+    public string NewPassword { get; set; } = string.Empty;
+}
+
+public class SendOtpDto
+{
+    public string Phone { get; set; } = string.Empty;
+}
+
+public class VerifyOtpDto
+{
+    public string Phone { get; set; } = string.Empty;
+    public string OtpCode { get; set; } = string.Empty;
+}
+
+public class ResetPasswordDto
+{
+    public string Phone { get; set; } = string.Empty;
+    public string OtpCode { get; set; } = string.Empty;
+    public string NewPassword { get; set; } = string.Empty;
 }

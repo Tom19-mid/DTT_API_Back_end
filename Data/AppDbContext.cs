@@ -19,7 +19,12 @@ public class AppDbContext : DbContext
     public DbSet<MedicalTest> MedicalTests => Set<MedicalTest>();
     public DbSet<UltrasoundResult> UltrasoundResults => Set<UltrasoundResult>();
     public DbSet<Invoice> Invoices => Set<Invoice>();
+    public DbSet<InvoiceItem> InvoiceItems => Set<InvoiceItem>();
     public DbSet<Notification> Notifications => Set<Notification>();
     public DbSet<HealthPackage> HealthPackages => Set<HealthPackage>();
     public DbSet<HealthPackageDetail> HealthPackageDetails => Set<HealthPackageDetail>();
+    public DbSet<MedicineCategory> MedicineCategories => Set<MedicineCategory>();
+    public DbSet<Medicine> Medicines => Set<Medicine>();
+    public DbSet<Prescription> Prescriptions => Set<Prescription>();
+    public DbSet<PrescriptionDetail> PrescriptionDetails => Set<PrescriptionDetail>();
 }
