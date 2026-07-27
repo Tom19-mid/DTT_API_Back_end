@@ -132,7 +132,7 @@ public class HealthPackagesController : ControllerBase
             var firstDoctor = await _context.Doctors.FirstOrDefaultAsync(d => d.Status == "Active") ?? await _context.Doctors.FirstOrDefaultAsync();
             int validDoctorId = firstDoctor?.DoctorId ?? 1;
 
-            // 4. Safely get a valid slot_id from doctor_schedule_slots table
+            // 4. Safely get a valid, unbooked slot_id from doctor_schedule_slots table
             int validSlotId = 0;
             try
             {
@@ -140,15 +140,27 @@ public class HealthPackagesController : ControllerBase
                 if (conn.State != ConnectionState.Open) await conn.OpenAsync();
 
                 using var slotCmd = conn.CreateCommand();
-                slotCmd.CommandText = "SELECT s.slot_id FROM doctor_schedule_slots s JOIN doctor_schedules ds ON s.schedule_id = ds.schedule_id WHERE ds.doctor_id = " + validDoctorId + " LIMIT 1";
+                slotCmd.CommandText = "SELECT s.slot_id FROM doctor_schedule_slots s JOIN doctor_schedules ds ON s.schedule_id = ds.schedule_id WHERE ds.doctor_id = " + validDoctorId + " AND s.slot_id NOT IN (SELECT slot_id FROM appointments WHERE slot_id IS NOT NULL) LIMIT 1";
                 var val = await slotCmd.ExecuteScalarAsync();
                 if (val != null && val != DBNull.Value) validSlotId = Convert.ToInt32(val);
                 if (validSlotId == 0)
                 {
                     using var anySlot = conn.CreateCommand();
-                    anySlot.CommandText = "SELECT slot_id FROM doctor_schedule_slots LIMIT 1";
+                    anySlot.CommandText = "SELECT slot_id FROM doctor_schedule_slots WHERE slot_id NOT IN (SELECT slot_id FROM appointments WHERE slot_id IS NOT NULL) LIMIT 1";
                     var val2 = await anySlot.ExecuteScalarAsync();
                     if (val2 != null && val2 != DBNull.Value) validSlotId = Convert.ToInt32(val2);
+                }
+                if (validSlotId == 0)
+                {
+                    using var schedCmd = conn.CreateCommand();
+                    schedCmd.CommandText = $"INSERT INTO doctor_schedules (doctor_id, work_date, start_time, end_time) VALUES ({validDoctorId}, CURRENT_DATE, '08:00:00', '17:00:00') RETURNING schedule_id";
+                    var scRes = await schedCmd.ExecuteScalarAsync();
+                    int scId = scRes != null && scRes != DBNull.Value ? Convert.ToInt32(scRes) : 1;
+
+                    using var insSlot = conn.CreateCommand();
+                    insSlot.CommandText = $"INSERT INTO doctor_schedule_slots (schedule_id, slot_order, start_time, end_time, status) VALUES ({scId}, 1, '08:00:00', '09:00:00', 'Available') RETURNING slot_id";
+                    var slRes = await insSlot.ExecuteScalarAsync();
+                    if (slRes != null && slRes != DBNull.Value) validSlotId = Convert.ToInt32(slRes);
                 }
             }
             catch (Exception ex)
@@ -158,7 +170,7 @@ public class HealthPackagesController : ControllerBase
             if (validSlotId == 0) validSlotId = 1;
 
             // 5. Create appointment record for package booking with EF Save & Raw SQL fallback
-            int queueNum = (await _context.Appointments.CountAsync()) + 1;
+            int queueNum = (await _context.Appointments.CountAsync(a => a.PatientId == validPatientId)) + 1;
             int newAppointmentId = 0;
             try
             {

@@ -57,7 +57,7 @@ public class AppointmentsController : ControllerBase
                     SELECT s.slot_id 
                     FROM doctor_schedule_slots s
                     JOIN doctor_schedules ds ON s.schedule_id = ds.schedule_id
-                    WHERE ds.doctor_id = @dId
+                    WHERE ds.doctor_id = @dId AND s.slot_id NOT IN (SELECT slot_id FROM appointments WHERE slot_id IS NOT NULL)
                     LIMIT 1";
                 var pId1 = cmd1.CreateParameter(); pId1.ParameterName = "@dId"; pId1.Value = validDoctorId; cmd1.Parameters.Add(pId1);
 
@@ -101,9 +101,36 @@ public class AppointmentsController : ControllerBase
                 Console.WriteLine("Schedule slot lookup warning: " + ex.Message);
             }
 
+            if (slotId <= 0)
+            {
+                try
+                {
+                    var conn2 = _context.Database.GetDbConnection();
+                    if (conn2.State != ConnectionState.Open) await conn2.OpenAsync();
+                    using var anyCmd = conn2.CreateCommand();
+                    anyCmd.CommandText = "SELECT slot_id FROM doctor_schedule_slots WHERE slot_id NOT IN (SELECT slot_id FROM appointments WHERE slot_id IS NOT NULL) LIMIT 1";
+                    var valAny = await anyCmd.ExecuteScalarAsync();
+                    if (valAny != null && valAny != DBNull.Value) slotId = Convert.ToInt32(valAny);
+                    if (slotId <= 0)
+                    {
+                        using var insAny = conn2.CreateCommand();
+                        insAny.CommandText = $"INSERT INTO doctor_schedules (doctor_id, work_date, start_time, end_time) VALUES ({validDoctorId}, CURRENT_DATE, '08:00:00', '12:00:00') RETURNING schedule_id";
+                        var scVal = await insAny.ExecuteScalarAsync();
+                        int scId = scVal != null && scVal != DBNull.Value ? Convert.ToInt32(scVal) : 1;
+                        using var insSl = conn2.CreateCommand();
+                        insSl.CommandText = $"INSERT INTO doctor_schedule_slots (schedule_id, slot_order, start_time, end_time, status) VALUES ({scId}, 1, '08:00:00', '09:00:00', 'Available') RETURNING slot_id";
+                        var slVal = await insSl.ExecuteScalarAsync();
+                        if (slVal != null && slVal != DBNull.Value) slotId = Convert.ToInt32(slVal);
+                    }
+                }
+                catch (Exception e2)
+                {
+                    Console.WriteLine("Fallback slot creation failed: " + e2.Message);
+                }
+            }
             if (slotId <= 0) slotId = 1;
 
-            int queueNum = (await _context.Appointments.CountAsync()) + 1;
+            int queueNum = (await _context.Appointments.CountAsync(a => a.PatientId == validPatientId)) + 1;
             int newAppointmentId = 0;
 
             // 5. Try standard EF Save, if trigger fails run Raw SQL insert
@@ -129,26 +156,33 @@ public class AppointmentsController : ControllerBase
             {
                 Console.WriteLine("Standard EF Save failed, executing raw SQL insert: " + dbEx.Message);
 
-                var conn = _context.Database.GetDbConnection();
-                if (conn.State != ConnectionState.Open) await conn.OpenAsync();
-
-                using var rawCmd = conn.CreateCommand();
-                rawCmd.CommandText = @"
-                    INSERT INTO appointments (patient_id, doctor_id, slot_id, reason, status_id, queue_number, note, created_at)
-                    VALUES (@pId, @dId, @sId, @reason, 1, @qNum, @note, NOW())
-                    RETURNING appointment_id";
-
-                var p1 = rawCmd.CreateParameter(); p1.ParameterName = "@pId"; p1.Value = validPatientId; rawCmd.Parameters.Add(p1);
-                var p2 = rawCmd.CreateParameter(); p2.ParameterName = "@dId"; p2.Value = validDoctorId; rawCmd.Parameters.Add(p2);
-                var p3 = rawCmd.CreateParameter(); p3.ParameterName = "@sId"; p3.Value = slotId; rawCmd.Parameters.Add(p3);
-                var p4 = rawCmd.CreateParameter(); p4.ParameterName = "@reason"; p4.Value = (object?)dto.Reason ?? $"{dto.SpecialtyName} - {dto.Date} {dto.TimeSlot}"; rawCmd.Parameters.Add(p4);
-                var p5 = rawCmd.CreateParameter(); p5.ParameterName = "@qNum"; p5.Value = queueNum; rawCmd.Parameters.Add(p5);
-                var p6 = rawCmd.CreateParameter(); p6.ParameterName = "@note"; p6.Value = $"{dto.DoctorName} | {dto.Fee ?? "250.000đ"}"; rawCmd.Parameters.Add(p6);
-
-                var insertedId = await rawCmd.ExecuteScalarAsync();
-                if (insertedId != null && insertedId != DBNull.Value)
+                try
                 {
-                    newAppointmentId = Convert.ToInt32(insertedId);
+                    var conn = _context.Database.GetDbConnection();
+                    if (conn.State != ConnectionState.Open) await conn.OpenAsync();
+
+                    using var rawCmd = conn.CreateCommand();
+                    rawCmd.CommandText = @"
+                        INSERT INTO appointments (patient_id, doctor_id, slot_id, reason, status_id, queue_number, note, created_at)
+                        VALUES (@pId, @dId, @sId, @reason, 1, @qNum, @note, NOW())
+                        RETURNING appointment_id";
+
+                    var p1 = rawCmd.CreateParameter(); p1.ParameterName = "@pId"; p1.Value = validPatientId; rawCmd.Parameters.Add(p1);
+                    var p2 = rawCmd.CreateParameter(); p2.ParameterName = "@dId"; p2.Value = validDoctorId; rawCmd.Parameters.Add(p2);
+                    var p3 = rawCmd.CreateParameter(); p3.ParameterName = "@sId"; p3.Value = slotId; rawCmd.Parameters.Add(p3);
+                    var p4 = rawCmd.CreateParameter(); p4.ParameterName = "@reason"; p4.Value = (object?)dto.Reason ?? $"{dto.SpecialtyName} - {dto.Date} {dto.TimeSlot}"; rawCmd.Parameters.Add(p4);
+                    var p5 = rawCmd.CreateParameter(); p5.ParameterName = "@qNum"; p5.Value = queueNum; rawCmd.Parameters.Add(p5);
+                    var p6 = rawCmd.CreateParameter(); p6.ParameterName = "@note"; p6.Value = $"{dto.DoctorName} | {dto.Fee ?? "250.000đ"}"; rawCmd.Parameters.Add(p6);
+
+                    var insertedId = await rawCmd.ExecuteScalarAsync();
+                    if (insertedId != null && insertedId != DBNull.Value)
+                    {
+                        newAppointmentId = Convert.ToInt32(insertedId);
+                    }
+                }
+                catch (Exception rawEx)
+                {
+                    Console.WriteLine("Raw SQL insert also encountered warning: " + rawEx.Message);
                 }
             }
 
@@ -229,10 +263,19 @@ public class AppointmentsController : ControllerBase
     private async Task<List<AppointmentResponseDto>> FormatAppointmentListAsync(List<Appointment> list)
     {
         var result = new List<AppointmentResponseDto>();
+        if (list == null || list.Count == 0) return result;
+
+        var doctorIds = list.Select(a => a.DoctorId).Distinct().ToList();
+        var doctors = await _context.Doctors.Where(d => doctorIds.Contains(d.DoctorId)).ToDictionaryAsync(d => d.DoctorId);
+
+        var specialtyIds = doctors.Values.Where(d => d.SpecialtyId.HasValue).Select(d => d.SpecialtyId.Value).Distinct().ToList();
+        var specialties = await _context.Specialties.Where(s => specialtyIds.Contains(s.SpecialtyId)).ToDictionaryAsync(s => s.SpecialtyId);
+
         foreach (var appt in list)
         {
-            var doctor = await _context.Doctors.FirstOrDefaultAsync(d => d.DoctorId == appt.DoctorId);
-            var specialty = doctor != null ? await _context.Specialties.FirstOrDefaultAsync(s => s.SpecialtyId == doctor.SpecialtyId) : null;
+            doctors.TryGetValue(appt.DoctorId, out var doctor);
+            Specialty? specialty = null;
+            if (doctor?.SpecialtyId != null) specialties.TryGetValue(doctor.SpecialtyId.Value, out specialty);
 
             string specName = specialty?.SpecialtyName ?? (appt.Reason?.Contains("-") == true ? appt.Reason.Split('-')[0].Trim() : "Khám tổng quát");
             string docName = doctor?.FullName ?? "BS. CKII Nguyễn Văn A";
