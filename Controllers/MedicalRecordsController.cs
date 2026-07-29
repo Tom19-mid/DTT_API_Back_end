@@ -205,7 +205,7 @@ public class MedicalRecordsController : ControllerBase
                 DoctorId = docId,
                 SlotId = slotId,
                 Reason = "Khám tổng quát (Auto-seeded)",
-                StatusId = 3, // Status 3 = Completed
+                StatusId = 2, // Status 2 = Completed
                 IsActive = false, // Must be false for historical records to bypass idx_appointments_slot_active
                 QueueNumber = new Random().Next(1, 100),
                 CreatedAt = DateTime.UtcNow

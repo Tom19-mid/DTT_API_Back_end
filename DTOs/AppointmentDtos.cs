@@ -16,6 +16,10 @@ public class AppointmentResponseDto
 {
     public int AppointmentId { get; set; }
     public int PatientId { get; set; }
+    public string PatientName { get; set; } = string.Empty;
+    public string PatientGender { get; set; } = string.Empty;
+    public int PatientAge { get; set; }
+    public string? Reason { get; set; }
     public int DoctorId { get; set; }
     public string DoctorName { get; set; } = string.Empty;
     public string SpecialtyName { get; set; } = string.Empty;

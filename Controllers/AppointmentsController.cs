@@ -32,7 +32,8 @@ public class AppointmentsController : ControllerBase
                 _context.AppointmentStatuses.AddRange(
                     new AppointmentStatus { StatusId = 1, StatusName = "Confirmed" },
                     new AppointmentStatus { StatusId = 2, StatusName = "Completed" },
-                    new AppointmentStatus { StatusId = 3, StatusName = "Cancelled" }
+                    new AppointmentStatus { StatusId = 3, StatusName = "Cancelled" },
+                    new AppointmentStatus { StatusId = 4, StatusName = "InProgress" }
                 );
                 await _context.SaveChangesAsync();
             }
@@ -190,6 +191,10 @@ public class AppointmentsController : ControllerBase
             {
                 AppointmentId = newAppointmentId > 0 ? newAppointmentId : queueNum,
                 PatientId = validPatientId,
+                PatientName = patient?.FullName ?? $"Bệnh nhân #{validPatientId}",
+                PatientGender = !string.IsNullOrEmpty(patient?.Gender) ? patient.Gender : "Nam",
+                PatientAge = patient?.DateOfBirth.HasValue == true ? (int)((DateTime.UtcNow - patient.DateOfBirth.Value).TotalDays / 365.25) : 35,
+                Reason = dto.Reason,
                 DoctorId = validDoctorId,
                 DoctorName = !string.IsNullOrEmpty(dto.DoctorName) ? dto.DoctorName : doctor?.FullName ?? "BS. CK1 Nguyễn Văn A",
                 SpecialtyName = !string.IsNullOrEmpty(dto.SpecialtyName) ? dto.SpecialtyName : "Nội tổng quát",
@@ -209,6 +214,10 @@ public class AppointmentsController : ControllerBase
             {
                 AppointmentId = 1,
                 PatientId = dto.PatientId > 0 ? dto.PatientId : 1,
+                PatientName = $"Bệnh nhân #{(dto.PatientId > 0 ? dto.PatientId : 1)}",
+                PatientGender = "Nam",
+                PatientAge = 35,
+                Reason = dto.Reason,
                 DoctorId = dto.DoctorId > 0 ? dto.DoctorId : 1,
                 DoctorName = dto.DoctorName ?? "BS. CK1 Nguyễn Văn A",
                 SpecialtyName = dto.SpecialtyName ?? "Nội tổng quát",
@@ -268,14 +277,27 @@ public class AppointmentsController : ControllerBase
         var doctorIds = list.Select(a => a.DoctorId).Distinct().ToList();
         var doctors = await _context.Doctors.Where(d => doctorIds.Contains(d.DoctorId)).ToDictionaryAsync(d => d.DoctorId);
 
+        var patientIds = list.Select(a => a.PatientId).Distinct().ToList();
+        var patients = await _context.Patients.Where(p => patientIds.Contains(p.PatientId)).ToDictionaryAsync(p => p.PatientId);
+
         var specialtyIds = doctors.Values.Where(d => d.SpecialtyId.HasValue).Select(d => d.SpecialtyId.Value).Distinct().ToList();
         var specialties = await _context.Specialties.Where(s => specialtyIds.Contains(s.SpecialtyId)).ToDictionaryAsync(s => s.SpecialtyId);
 
         foreach (var appt in list)
         {
             doctors.TryGetValue(appt.DoctorId, out var doctor);
+            patients.TryGetValue(appt.PatientId, out var patient);
             Specialty? specialty = null;
             if (doctor?.SpecialtyId != null) specialties.TryGetValue(doctor.SpecialtyId.Value, out specialty);
+
+            string patientName = patient?.FullName ?? $"Bệnh nhân #{appt.PatientId}";
+            string patientGender = !string.IsNullOrEmpty(patient?.Gender) ? patient.Gender : "Nam";
+            int patientAge = 35;
+            if (patient?.DateOfBirth.HasValue == true)
+            {
+                patientAge = (int)((DateTime.UtcNow - patient.DateOfBirth.Value).TotalDays / 365.25);
+                if (patientAge <= 0) patientAge = 35;
+            }
 
             string specName = specialty?.SpecialtyName ?? (appt.Reason?.Contains("-") == true ? appt.Reason.Split('-')[0].Trim() : "Khám tổng quát");
             string docName = doctor?.FullName ?? "BS. CKII Nguyễn Văn A";
@@ -322,16 +344,34 @@ public class AppointmentsController : ControllerBase
                 if (timeMatch.Success) timeStr = timeMatch.Value;
             }
 
+            if (isPkg && !string.IsNullOrEmpty(appt.Note) && appt.Note.Contains("Bệnh nhân:"))
+            {
+                var parts = appt.Note.Split('|');
+                foreach (var p in parts)
+                {
+                    if (p.Trim().StartsWith("Bệnh nhân:"))
+                    {
+                        string extracted = p.Trim().Substring("Bệnh nhân:".Length).Trim();
+                        if (!string.IsNullOrEmpty(extracted)) patientName = extracted;
+                        break;
+                    }
+                }
+            }
+
             result.Add(new AppointmentResponseDto
             {
                 AppointmentId = appt.AppointmentId,
                 PatientId = appt.PatientId,
+                PatientName = patientName,
+                PatientGender = patientGender,
+                PatientAge = patientAge,
+                Reason = appt.Reason,
                 DoctorId = appt.DoctorId,
                 DoctorName = docName,
                 SpecialtyName = specName,
                 Date = dateStr,
                 TimeSlot = timeStr,
-                Status = appt.StatusId == 1 ? "Confirmed" : appt.StatusId == 2 ? "Completed" : "Cancelled",
+                Status = appt.StatusId == 1 ? "Confirmed" : appt.StatusId == 2 ? "Completed" : appt.StatusId == 4 ? "InProgress" : "Cancelled",
                 QueueNumber = appt.QueueNumber,
                 ClinicRoom = isPkg ? "" : (doctor?.ClinicRoom ?? "Phòng 101"),
                 Fee = feeStr,
@@ -412,6 +452,27 @@ public class AppointmentsController : ControllerBase
                             UserId = targetUserId,
                             Title = "⚠️ Bác Sĩ Đã Hủy Lịch Khám",
                             Content = "Lịch hẹn khám bệnh của bạn đã được bác sĩ trực chủ động hủy và cập nhật hệ thống do lịch làm việc thay đổi. Vui lòng đặt lại lịch mới!",
+                            Type = "appointment",
+                            IsRead = false,
+                            CreatedAt = DateTime.UtcNow
+                        });
+                    }
+                }
+                else if (status == "InProgress")
+                {
+                    if (!await _context.AppointmentStatuses.AnyAsync(s => s.StatusId == 4))
+                    {
+                        _context.AppointmentStatuses.Add(new AppointmentStatus { StatusId = 4, StatusName = "InProgress" });
+                        try { await _context.SaveChangesAsync(); } catch { }
+                    }
+                    appt.StatusId = 4;
+                    if (targetUserId != Guid.Empty)
+                    {
+                        _context.Notifications.Add(new Notification
+                        {
+                            UserId = targetUserId,
+                            Title = "🔔 Bác Sĩ Đang Gọi Khám",
+                            Content = "Bác sĩ trực đang mời bạn vào phòng khám! Vui lòng di chuyển ngay tới trước khu vực phòng khám để bắt đầu.",
                             Type = "appointment",
                             IsRead = false,
                             CreatedAt = DateTime.UtcNow

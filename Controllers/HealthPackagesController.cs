@@ -119,7 +119,8 @@ public class HealthPackagesController : ControllerBase
                 _context.AppointmentStatuses.AddRange(
                     new AppointmentStatus { StatusId = 1, StatusName = "Confirmed" },
                     new AppointmentStatus { StatusId = 2, StatusName = "Completed" },
-                    new AppointmentStatus { StatusId = 3, StatusName = "Cancelled" }
+                    new AppointmentStatus { StatusId = 3, StatusName = "Cancelled" },
+                    new AppointmentStatus { StatusId = 4, StatusName = "InProgress" }
                 );
                 try { await _context.SaveChangesAsync(); } catch { }
             }
