@@ -371,10 +371,77 @@ public class AppointmentsController : ControllerBase
             return StatusCode(500, new { success = false, message = "Lỗi khi hủy lịch: " + ex.Message });
         }
     }
+
+    [HttpPut("{id}/status")]
+    public async Task<IActionResult> UpdateStatus(int id, [FromBody] UpdateStatusRequest? req = null)
+    {
+        try
+        {
+            var appt = await _context.Appointments.FirstOrDefaultAsync(a => a.AppointmentId == id);
+            if (appt != null)
+            {
+                string status = req?.Status ?? "Confirmed";
+                var patient = await _context.Patients.FirstOrDefaultAsync(p => p.PatientId == appt.PatientId);
+                Guid targetUserId = patient?.UserId ?? Guid.Empty;
+
+                if (status == "Completed")
+                {
+                    appt.StatusId = 2;
+                    if (targetUserId != Guid.Empty)
+                    {
+                        _context.Notifications.Add(new Notification
+                        {
+                            UserId = targetUserId,
+                            Title = "✅ Hoàn Tất Khám Lâm Sàng",
+                            Content = "Ca khám bệnh của bạn đã hoàn tất thành công. Vui lòng kiểm tra kết quả hoặc đơn thuốc chỉ định trong hồ sơ y tế.",
+                            Type = "result",
+                            IsRead = false,
+                            CreatedAt = DateTime.UtcNow
+                        });
+                    }
+                }
+                else if (status == "Cancelled")
+                {
+                    appt.StatusId = 3;
+                    appt.CancelledAt = DateTime.UtcNow;
+                    appt.CancelReason = "Bác sĩ trực hủy lịch từ giao diện Desktop";
+                    if (targetUserId != Guid.Empty)
+                    {
+                        _context.Notifications.Add(new Notification
+                        {
+                            UserId = targetUserId,
+                            Title = "⚠️ Bác Sĩ Đã Hủy Lịch Khám",
+                            Content = "Lịch hẹn khám bệnh của bạn đã được bác sĩ trực chủ động hủy và cập nhật hệ thống do lịch làm việc thay đổi. Vui lòng đặt lại lịch mới!",
+                            Type = "appointment",
+                            IsRead = false,
+                            CreatedAt = DateTime.UtcNow
+                        });
+                    }
+                }
+                else
+                {
+                    appt.StatusId = 1;
+                }
+                await _context.SaveChangesAsync();
+                return Ok(new { success = true, message = $"Cập nhật trạng thái thành [{status}] trực tiếp vào CSDL." });
+            }
+            return NotFound(new { success = false, message = "Không tìm thấy lịch khám trong CSDL." });
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine("Error updating status: " + ex.Message);
+            return StatusCode(500, new { success = false, message = ex.Message });
+        }
+    }
 }
 
 public class CancelAppointmentRequest
 {
     public string? CancelReason { get; set; }
     public string? CancelledBy { get; set; }
+}
+
+public class UpdateStatusRequest
+{
+    public string? Status { get; set; }
 }

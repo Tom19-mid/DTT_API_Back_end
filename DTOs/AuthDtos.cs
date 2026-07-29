@@ -43,3 +43,17 @@ public class AuthResponseDto
     public string VerificationStatus { get; set; } = "pending";
     public string? OtpCode { get; set; }
 }
+
+public class DoctorAuthResponseDto
+{
+    public string Token { get; set; } = string.Empty;
+    public Guid UserId { get; set; }
+    public int DoctorId { get; set; }
+    public string FullName { get; set; } = string.Empty;
+    public string Degree { get; set; } = string.Empty;
+    public string ClinicRoom { get; set; } = string.Empty;
+    public int SpecialtyId { get; set; }
+    public string SpecialtyName { get; set; } = string.Empty;
+    public string Phone { get; set; } = string.Empty;
+    public string Email { get; set; } = string.Empty;
+}

@@ -67,6 +67,72 @@ public class AuthController : ControllerBase
         });
     }
 
+    [HttpPost("doctor-login")]
+    public async Task<IActionResult> DoctorLogin([FromBody] LoginRequestDto dto)
+    {
+        if (!ModelState.IsValid) return BadRequest(ModelState);
+
+        var user = await _context.Users.FirstOrDefaultAsync(u => u.PhoneNumber == dto.Phone);
+        if (user == null)
+        {
+            return Unauthorized(new { message = "Số điện thoại hoặc mật khẩu không chính xác." });
+        }
+
+        bool isValidPassword = false;
+        try
+        {
+            isValidPassword = BCrypt.Net.BCrypt.Verify(dto.Password, user.PasswordHash);
+        }
+        catch
+        {
+            isValidPassword = user.PasswordHash == dto.Password;
+        }
+
+        if (!isValidPassword)
+        {
+            return Unauthorized(new { message = "Số điện thoại hoặc mật khẩu không chính xác." });
+        }
+
+        var doctor = await _context.Doctors.FirstOrDefaultAsync(d => d.UserId == user.UserId);
+        if (doctor == null && user.RoleId != 2)
+        {
+            return Unauthorized(new { message = "Tài khoản của bạn không có quyền ra vào Không gian Bác sĩ." });
+        }
+
+        if (doctor == null)
+        {
+            // Auto-create basic doctor profile if RoleId == 2 but no Doctor entry found
+            doctor = new Doctor
+            {
+                UserId = user.UserId,
+                FullName = "BS. Điều trị",
+                Degree = "Bác sĩ Chuyên khoa",
+                ExperienceYears = 5,
+                ClinicRoom = "Phòng 101",
+                SpecialtyId = 1,
+                Status = "Active"
+            };
+            _context.Doctors.Add(doctor);
+            await _context.SaveChangesAsync();
+        }
+
+        var specialty = doctor.SpecialtyId.HasValue ? await _context.Specialties.FirstOrDefaultAsync(s => s.SpecialtyId == doctor.SpecialtyId.Value) : null;
+
+        return Ok(new DoctorAuthResponseDto
+        {
+            Token = GenerateJwtToken(user),
+            UserId = user.UserId,
+            DoctorId = doctor.DoctorId,
+            FullName = doctor.FullName ?? "Bác sĩ",
+            Degree = doctor.Degree ?? "Chuyên khoa",
+            ClinicRoom = doctor.ClinicRoom ?? "Phòng 101",
+            SpecialtyId = doctor.SpecialtyId ?? 1,
+            SpecialtyName = specialty?.SpecialtyName ?? "Nội tổng quát",
+            Phone = user.PhoneNumber,
+            Email = user.Email
+        });
+    }
+
     [HttpPost("register")]
     public async Task<IActionResult> Register([FromBody] RegisterRequestDto dto)
     {
