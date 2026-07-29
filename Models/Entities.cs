@@ -15,6 +15,10 @@ public class Role
     [StringLength(50)]
     public string RoleName { get; set; } = string.Empty;
 
+    [Column("role_code")]
+    [StringLength(50)]
+    public string? RoleCode { get; set; }
+
     [Column("description")]
     public string? Description { get; set; }
 }
@@ -256,7 +260,7 @@ public class Appointment
     public int DoctorId { get; set; }
 
     [Column("slot_id")]
-    public int SlotId { get; set; }
+    public int? SlotId { get; set; }
 
     [Column("reason")]
     public string? Reason { get; set; }
@@ -331,6 +335,30 @@ public class MedicalRecord
 
     [Column("doctor_note")]
     public string? DoctorNote { get; set; }
+
+    [Column("blood_pressure")]
+    public string? BloodPressure { get; set; }
+
+    [Column("heart_rate")]
+    public int? HeartRate { get; set; }
+
+    [Column("temperature")]
+    public decimal? Temperature { get; set; }
+
+    [Column("height")]
+    public decimal? Height { get; set; }
+
+    [Column("weight")]
+    public decimal? Weight { get; set; }
+
+    [Column("bmi")]
+    public decimal? Bmi { get; set; }
+
+    [Column("icd_code")]
+    public string? IcdCode { get; set; }
+
+    [Column("icd_description")]
+    public string? IcdDescription { get; set; }
 
     [Column("examination_date")]
     public DateTime ExaminationDate { get; set; }

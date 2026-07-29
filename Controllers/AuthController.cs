@@ -118,15 +118,22 @@ public class AuthController : ControllerBase
 
         var specialty = doctor.SpecialtyId.HasValue ? await _context.Specialties.FirstOrDefaultAsync(s => s.SpecialtyId == doctor.SpecialtyId.Value) : null;
 
+        var role = await _context.Roles.FirstOrDefaultAsync(r => r.RoleId == user.RoleId);
+        string roleCode = role?.RoleCode ?? (user.RoleId == 1 ? "ADMIN" : user.RoleId == 3 ? "PATIENT" : user.RoleId == 4 ? "RECEPTIONIST" : user.RoleId == 5 ? "NURSE" : user.RoleId == 6 ? "LAB_TECH" : user.RoleId == 7 ? "PHARMACIST" : "DOCTOR");
+        string roleName = role?.RoleName ?? (user.RoleId == 1 ? "Quản trị viên" : user.RoleId == 4 ? "Lễ tân tiếp đón" : user.RoleId == 5 ? "Điều dưỡng" : user.RoleId == 6 ? "Kỹ thuật viên CLS" : user.RoleId == 7 ? "Dược sĩ" : "Bác sĩ");
+
         return Ok(new DoctorAuthResponseDto
         {
             Token = GenerateJwtToken(user),
             UserId = user.UserId,
-            DoctorId = doctor.DoctorId,
-            FullName = doctor.FullName ?? "Bác sĩ",
-            Degree = doctor.Degree ?? "Chuyên khoa",
-            ClinicRoom = doctor.ClinicRoom ?? "Phòng 101",
-            SpecialtyId = doctor.SpecialtyId ?? 1,
+            DoctorId = doctor?.DoctorId ?? 0,
+            RoleId = user.RoleId,
+            RoleCode = roleCode,
+            RoleName = roleName,
+            FullName = doctor?.FullName ?? (roleName + " " + (user.PhoneNumber.Length > 4 ? user.PhoneNumber.Substring(user.PhoneNumber.Length - 4) : "")),
+            Degree = doctor?.Degree ?? roleName,
+            ClinicRoom = doctor?.ClinicRoom ?? "Quầy làm việc",
+            SpecialtyId = doctor?.SpecialtyId ?? 1,
             SpecialtyName = specialty?.SpecialtyName ?? "Nội tổng quát",
             Phone = user.PhoneNumber,
             Email = user.Email

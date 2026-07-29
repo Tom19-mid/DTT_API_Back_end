@@ -22,7 +22,19 @@ public class MedicalRecordsController : ControllerBase
     {
         try
         {
-            var doctorMap = await _context.Doctors.ToDictionaryAsync(d => d.DoctorId, d => d.FullName ?? "Bác sĩ");
+            var docList = await _context.Doctors.ToListAsync();
+            var specList = await _context.Specialties.ToListAsync();
+            var specDict = specList.ToDictionary(s => s.SpecialtyId, s => s.SpecialtyName);
+
+            var doctorMap = docList.ToDictionary(d => d.DoctorId, d => d.FullName ?? "Bác sĩ");
+            var doctorSpecMap = docList.ToDictionary(d => d.DoctorId, d => {
+                if (d.SpecialtyId.HasValue && specDict.ContainsKey(d.SpecialtyId.Value))
+                    return specDict[d.SpecialtyId.Value];
+                if (!string.IsNullOrEmpty(d.Degree))
+                    return d.Degree.Replace("Thạc sĩ Chuyên môn ", "").Replace("Chuyên khoa II ", "");
+                return "Nội tổng quát";
+            });
+
             var specialtyMap = new Dictionary<int, string>
             {
                 { 1, "pediatrics" },
@@ -40,16 +52,6 @@ public class MedicalRecordsController : ControllerBase
                 .OrderByDescending(r => r.ExaminationDate)
                 .ToListAsync();
 
-            // Auto-seed if empty
-            if (records.Count == 0)
-            {
-                await TrySeedSampleRecords(patientId);
-                records = await _context.MedicalRecords
-                    .Where(r => r.PatientId == patientId)
-                    .OrderByDescending(r => r.ExaminationDate)
-                    .ToListAsync();
-            }
-
             var phieuKham = new List<object>();
             var xetNghiem = new List<object>();
             var sieuAm = new List<object>();
@@ -57,7 +59,9 @@ public class MedicalRecordsController : ControllerBase
             foreach (var r in records)
             {
                 string doctorName = doctorMap.ContainsKey(r.DoctorId) ? doctorMap[r.DoctorId] : "BS. Nguyễn Văn A";
-                string clinicKey = specialtyMap.ContainsKey(r.DoctorId % 7 + 1) ? specialtyMap[r.DoctorId % 7 + 1] : "general_internal";
+                string specialtyName = doctorSpecMap.ContainsKey(r.DoctorId) ? doctorSpecMap[r.DoctorId] : "Nội tổng quát";
+                int specId = docList.FirstOrDefault(d => d.DoctorId == r.DoctorId)?.SpecialtyId ?? 2;
+                string clinicKey = specialtyMap.ContainsKey(specId) ? specialtyMap[specId] : "general_internal";
                 string code = $"PK-{r.ExaminationDate:yyyyMMdd}-{r.MedicalRecordId:D2}";
 
                 phieuKham.Add(new
@@ -65,12 +69,19 @@ public class MedicalRecordsController : ControllerBase
                     id = r.MedicalRecordId,
                     date = r.ExaminationDate.ToString("dd/MM/yyyy"),
                     doctor = doctorName,
+                    specialtyName = specialtyName,
                     clinicKey = clinicKey,
                     code = code,
                     symptoms = r.Symptoms,
                     diagnosis = r.Diagnosis,
                     conclusion = r.Conclusion,
-                    treatmentPlan = r.TreatmentPlan
+                    treatmentPlan = r.TreatmentPlan,
+                    bloodPressure = r.BloodPressure,
+                    heartRate = r.HeartRate,
+                    temperature = r.Temperature,
+                    weight = r.Weight,
+                    height = r.Height,
+                    bmi = r.Bmi
                 });
 
                 // Load tests for this medical record
@@ -104,8 +115,6 @@ public class MedicalRecordsController : ControllerBase
                 }
             }
 
-            // Fallback mock data removed to use real database data only
-
             // 2. Toa thuoc (Prescriptions)
             var prescriptions = await _context.Prescriptions
                 .Where(p => p.PatientId == patientId)
@@ -126,7 +135,12 @@ public class MedicalRecordsController : ControllerBase
                     doctor = doctorName,
                     clinicKey = "general_internal",
                     items = itemsStr,
-                    code = $"TT-{p.CreatedAt:yyyyMMdd}-{p.PrescriptionId:D2}"
+                    code = $"TT-{p.CreatedAt:yyyyMMdd}-{p.PrescriptionId:D2}",
+                    prescriptionItems = details.Select(d => new
+                    {
+                        name = d.MedicineNameSnapshot,
+                        usage = $"Số lượng: {d.Quantity} {d.UnitSnapshot}. {d.UsageInstruction}"
+                    }).ToList()
                 });
             }
             // Fallback mock data removed
@@ -301,4 +315,151 @@ public class MedicalRecordsController : ControllerBase
             // Suppress seed errors if foreign key references do not match in clean DB
         }
     }
+
+    // POST /api/MedicalRecords
+    [HttpPost]
+    public async Task<IActionResult> CreateMedicalRecord([FromBody] CreateMedicalRecordDto dto)
+    {
+        try
+        {
+            // 1. Create MedicalRecord entity
+            var record = new MedicalRecord
+            {
+                AppointmentId = dto.AppointmentId,
+                PatientId = dto.PatientId,
+                DoctorId = dto.DoctorId > 0 ? dto.DoctorId : 1,
+                Symptoms = dto.Symptoms,
+                Diagnosis = dto.Diagnosis,
+                TreatmentPlan = dto.TreatmentPlan,
+                BloodPressure = dto.BloodPressure,
+                DoctorNote = $"Lưu lúc {DateTime.Now:HH:mm dd/MM/yyyy}",
+                ExaminationDate = DateTime.UtcNow,
+                Status = "Completed",
+                CreatedAt = DateTime.UtcNow,
+                UpdatedAt = DateTime.UtcNow
+            };
+
+            if (decimal.TryParse(dto.Temperature, out decimal temp)) record.Temperature = temp;
+            if (decimal.TryParse(dto.Weight, out decimal w)) record.Weight = w;
+            if (decimal.TryParse(dto.Height, out decimal h)) record.Height = h;
+            if (int.TryParse(dto.Pulse, out int pulse)) record.HeartRate = pulse;
+
+            if (record.Height > 0 && record.Weight > 0)
+            {
+                decimal hM = record.Height.Value / 100m;
+                record.Bmi = Math.Round(record.Weight.Value / (hM * hM), 1);
+            }
+
+            _context.MedicalRecords.Add(record);
+            await _context.SaveChangesAsync();
+
+            // 2. Create Prescription if drugs exist
+            if (dto.Prescriptions != null && dto.Prescriptions.Count > 0)
+            {
+                var prescription = new Prescription
+                {
+                    MedicalRecordId = record.MedicalRecordId,
+                    DoctorId = record.DoctorId,
+                    PatientId = dto.PatientId,
+                    Status = "Active",
+                    Note = "Đơn thuốc điện tử",
+                    CreatedAt = DateTime.UtcNow,
+                    UpdatedAt = DateTime.UtcNow
+                };
+                _context.Prescriptions.Add(prescription);
+                await _context.SaveChangesAsync();
+
+                foreach (var drug in dto.Prescriptions)
+                {
+                    var detail = new PrescriptionDetail
+                    {
+                        PrescriptionId = prescription.PrescriptionId,
+                        MedicineId = drug.MedicineId > 0 ? drug.MedicineId : 1,
+                        MedicineNameSnapshot = drug.MedicineName,
+                        UnitSnapshot = drug.Unit,
+                        Quantity = drug.Quantity,
+                        Dosage = drug.Dosage ?? "500mg",
+                        Frequency = drug.Frequency ?? "2 lần/ngày",
+                        Duration = "7 ngày",
+                        UsageInstruction = drug.UsageInstruction,
+                        CreatedAt = DateTime.UtcNow,
+                        UpdatedAt = DateTime.UtcNow
+                    };
+                    _context.PrescriptionDetails.Add(detail);
+                }
+                await _context.SaveChangesAsync();
+            }
+
+            // 3. Update appointment status to Completed (4)
+            var appt = await _context.Appointments.FirstOrDefaultAsync(a => a.AppointmentId == dto.AppointmentId);
+            if (appt != null)
+            {
+                appt.StatusId = 4; // 4 = Completed
+                appt.UpdatedAt = DateTime.UtcNow;
+                await _context.SaveChangesAsync();
+            }
+
+            // 4. Automatically generate Invoice for completed examination
+            var invoice = new Invoice
+            {
+                AppointmentId = dto.AppointmentId,
+                PatientId = dto.PatientId,
+                TotalAmount = 250000,
+                PaidAmount = 250000,
+                PaymentStatus = "paid",
+                PaymentMethod = "Thanh toán viện phí",
+                InvoiceDate = DateTime.UtcNow,
+                CreatedAt = DateTime.UtcNow,
+                UpdatedAt = DateTime.UtcNow
+            };
+            _context.Invoices.Add(invoice);
+            await _context.SaveChangesAsync();
+
+            _context.InvoiceItems.Add(new InvoiceItem
+            {
+                InvoiceId = invoice.InvoiceId,
+                ItemName = "Chi phí khám chuyên khoa & Dịch vụ y tế",
+                ItemType = "Consultation",
+                Quantity = 1,
+                UnitPrice = 250000,
+                Amount = 250000,
+                CreatedAt = DateTime.UtcNow,
+                UpdatedAt = DateTime.UtcNow
+            });
+            await _context.SaveChangesAsync();
+
+            return Ok(new { success = true, medicalRecordId = record.MedicalRecordId, invoiceId = invoice.InvoiceId });
+        }
+        catch (Exception ex)
+        {
+            return StatusCode(500, new { message = ex.Message });
+        }
+    }
+}
+
+public class CreateMedicalRecordDto
+{
+    public int AppointmentId { get; set; }
+    public int PatientId { get; set; }
+    public int DoctorId { get; set; }
+    public string Pulse { get; set; } = string.Empty;
+    public string BloodPressure { get; set; } = string.Empty;
+    public string Temperature { get; set; } = string.Empty;
+    public string Weight { get; set; } = string.Empty;
+    public string Height { get; set; } = string.Empty;
+    public string Symptoms { get; set; } = string.Empty;
+    public string Diagnosis { get; set; } = string.Empty;
+    public string TreatmentPlan { get; set; } = string.Empty;
+    public List<PrescribedDrugDto> Prescriptions { get; set; } = new();
+}
+
+public class PrescribedDrugDto
+{
+    public int MedicineId { get; set; }
+    public string MedicineName { get; set; } = string.Empty;
+    public string Unit { get; set; } = "Viên";
+    public int Quantity { get; set; } = 10;
+    public string Dosage { get; set; } = "500mg";
+    public string Frequency { get; set; } = "2 lần/ngày";
+    public string UsageInstruction { get; set; } = "Uống sau ăn 30 phút";
 }

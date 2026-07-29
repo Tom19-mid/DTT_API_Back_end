@@ -335,13 +335,24 @@ public class AppointmentsController : ControllerBase
             string dateStr = appt.CreatedAt.ToString("dd/MM/yyyy");
             string timeStr = "08:30 - 09:30";
 
-            if (!string.IsNullOrEmpty(appt.Reason) && appt.Reason.Contains("/"))
+            if (!string.IsNullOrEmpty(appt.Reason))
             {
                 var dateMatch = System.Text.RegularExpressions.Regex.Match(appt.Reason, @"(\d{1,2}/\d{1,2}/\d{4})");
                 if (dateMatch.Success) dateStr = dateMatch.Value;
 
-                var timeMatch = System.Text.RegularExpressions.Regex.Match(appt.Reason, @"(\d{1,2}:\d{2}\s*-\s*\d{1,2}:\d{2})");
-                if (timeMatch.Success) timeStr = timeMatch.Value;
+                var rangeMatch = System.Text.RegularExpressions.Regex.Match(appt.Reason, @"(\d{1,2}:\d{2}\s*-\s*\d{1,2}:\d{2})");
+                if (rangeMatch.Success)
+                {
+                    timeStr = rangeMatch.Value;
+                }
+                else
+                {
+                    var singleTimeMatch = System.Text.RegularExpressions.Regex.Match(appt.Reason, @"(\d{1,2}:\d{2})");
+                    if (singleTimeMatch.Success)
+                    {
+                        timeStr = FormatTimeSlot(singleTimeMatch.Value);
+                    }
+                }
             }
 
             if (isPkg && !string.IsNullOrEmpty(appt.Note) && appt.Note.Contains("Bệnh nhân:"))
@@ -354,6 +365,24 @@ public class AppointmentsController : ControllerBase
                         string extracted = p.Trim().Substring("Bệnh nhân:".Length).Trim();
                         if (!string.IsNullOrEmpty(extracted)) patientName = extracted;
                         break;
+                    }
+                }
+            }
+
+            string statusStr = "Confirmed";
+            if (appt.StatusId == 6) statusStr = "NoShow";
+            else if (appt.StatusId == 5) statusStr = "Cancelled";
+            else if (appt.StatusId == 4) statusStr = "Completed";
+            else if (appt.StatusId == 3) statusStr = "InProgress";
+            else if (appt.StatusId == 2 || appt.StatusId == 1) statusStr = "Confirmed";
+
+            if ((appt.StatusId == 1 || appt.StatusId == 2 || appt.StatusId == 3) && !string.IsNullOrEmpty(dateStr))
+            {
+                if (DateTime.TryParseExact(dateStr, "d/M/yyyy", System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.None, out DateTime parsedDate))
+                {
+                    if (parsedDate.Date < DateTime.Today)
+                    {
+                        statusStr = "NoShow";
                     }
                 }
             }
@@ -371,7 +400,7 @@ public class AppointmentsController : ControllerBase
                 SpecialtyName = specName,
                 Date = dateStr,
                 TimeSlot = timeStr,
-                Status = appt.StatusId == 1 ? "Confirmed" : appt.StatusId == 2 ? "Completed" : appt.StatusId == 4 ? "InProgress" : "Cancelled",
+                Status = statusStr,
                 QueueNumber = appt.QueueNumber,
                 ClinicRoom = isPkg ? "" : (doctor?.ClinicRoom ?? "Phòng 101"),
                 Fee = feeStr,
@@ -424,9 +453,9 @@ public class AppointmentsController : ControllerBase
                 var patient = await _context.Patients.FirstOrDefaultAsync(p => p.PatientId == appt.PatientId);
                 Guid targetUserId = patient?.UserId ?? Guid.Empty;
 
-                if (status == "Completed")
+                if (status == "Completed" || status == "4")
                 {
-                    appt.StatusId = 2;
+                    appt.StatusId = 4; // 4 = Completed
                     if (targetUserId != Guid.Empty)
                     {
                         _context.Notifications.Add(new Notification
@@ -440,9 +469,9 @@ public class AppointmentsController : ControllerBase
                         });
                     }
                 }
-                else if (status == "Cancelled")
+                else if (status == "Cancelled" || status == "5")
                 {
-                    appt.StatusId = 3;
+                    appt.StatusId = 5; // 5 = Cancelled
                     appt.CancelledAt = DateTime.UtcNow;
                     appt.CancelReason = "Bác sĩ trực hủy lịch từ giao diện Desktop";
                     if (targetUserId != Guid.Empty)
@@ -458,14 +487,9 @@ public class AppointmentsController : ControllerBase
                         });
                     }
                 }
-                else if (status == "InProgress")
+                else if (status == "InProgress" || status == "3")
                 {
-                    if (!await _context.AppointmentStatuses.AnyAsync(s => s.StatusId == 4))
-                    {
-                        _context.AppointmentStatuses.Add(new AppointmentStatus { StatusId = 4, StatusName = "InProgress" });
-                        try { await _context.SaveChangesAsync(); } catch { }
-                    }
-                    appt.StatusId = 4;
+                    appt.StatusId = 3; // 3 = InProgress
                     if (targetUserId != Guid.Empty)
                     {
                         _context.Notifications.Add(new Notification
@@ -479,9 +503,13 @@ public class AppointmentsController : ControllerBase
                         });
                     }
                 }
+                else if (status == "NoShow" || status == "6")
+                {
+                    appt.StatusId = 6; // 6 = NoShow
+                }
                 else
                 {
-                    appt.StatusId = 1;
+                    appt.StatusId = 1; // 1 = Scheduled / Confirmed
                 }
                 await _context.SaveChangesAsync();
                 return Ok(new { success = true, message = $"Cập nhật trạng thái thành [{status}] trực tiếp vào CSDL." });
@@ -493,6 +521,20 @@ public class AppointmentsController : ControllerBase
             Console.WriteLine("Error updating status: " + ex.Message);
             return StatusCode(500, new { success = false, message = ex.Message });
         }
+    }
+
+    private static string FormatTimeSlot(string rawTime)
+    {
+        if (string.IsNullOrWhiteSpace(rawTime)) return "08:30 - 09:30";
+        rawTime = rawTime.Trim();
+        if (rawTime.Contains("-")) return rawTime;
+
+        if (TimeSpan.TryParse(rawTime, out TimeSpan ts))
+        {
+            TimeSpan endTs = ts.Add(TimeSpan.FromHours(1));
+            return $"{ts:hh\\:mm} - {endTs:hh\\:mm}";
+        }
+        return rawTime;
     }
 }
 
