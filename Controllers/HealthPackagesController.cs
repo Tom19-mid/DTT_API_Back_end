@@ -117,10 +117,13 @@ public class HealthPackagesController : ControllerBase
             if (statusCount == 0)
             {
                 _context.AppointmentStatuses.AddRange(
-                    new AppointmentStatus { StatusId = 1, StatusName = "Confirmed" },
-                    new AppointmentStatus { StatusId = 2, StatusName = "Completed" },
-                    new AppointmentStatus { StatusId = 3, StatusName = "Cancelled" },
-                    new AppointmentStatus { StatusId = 4, StatusName = "InProgress" }
+                    new AppointmentStatus { StatusId = 1, StatusName = "Scheduled" },
+                    new AppointmentStatus { StatusId = 2, StatusName = "Waiting" },
+                    new AppointmentStatus { StatusId = 3, StatusName = "InProgress" },
+                    new AppointmentStatus { StatusId = 4, StatusName = "Completed" },
+                    new AppointmentStatus { StatusId = 5, StatusName = "Cancelled" },
+                    new AppointmentStatus { StatusId = 6, StatusName = "NoShow" },
+                    new AppointmentStatus { StatusId = 7, StatusName = "CheckedIn" }
                 );
                 try { await _context.SaveChangesAsync(); } catch { }
             }
@@ -129,9 +132,24 @@ public class HealthPackagesController : ControllerBase
             var patient = await _context.Patients.FirstOrDefaultAsync(p => p.PatientId == req.PatientId);
             int validPatientId = patient?.PatientId ?? (await _context.Patients.FirstOrDefaultAsync())?.PatientId ?? 1;
 
-            // 3. Obtain a valid DoctorId from database (health packages rely on Note field for formatting, no fake doctor record needed)
-            var firstDoctor = await _context.Doctors.FirstOrDefaultAsync(d => d.Status == "Active") ?? await _context.Doctors.FirstOrDefaultAsync();
-            int validDoctorId = firstDoctor?.DoctorId ?? 1;
+            // 3. Obtain target specialty & doctor matching the health package domain
+            int targetSpecialtyId = 1;
+            string titleLower = pkg.Title.ToLower();
+            if (titleLower.Contains("tim mạch")) targetSpecialtyId = 5;
+            else if (titleLower.Contains("xương khớp") || titleLower.Contains("cột sống")) targetSpecialtyId = 4;
+            else if (titleLower.Contains("sản") || titleLower.Contains("phụ khoa")) targetSpecialtyId = 3;
+            else if (titleLower.Contains("nhi") || titleLower.Contains("trẻ em")) targetSpecialtyId = 2;
+            else if (titleLower.Contains("thần kinh")) targetSpecialtyId = 6;
+            else if (titleLower.Contains("da liễu")) targetSpecialtyId = 7;
+
+            var targetSpecObj = await _context.Specialties.FirstOrDefaultAsync(s => s.SpecialtyId == targetSpecialtyId);
+            string specName = targetSpecObj?.SpecialtyName ?? "Nội tổng quát";
+
+            var matchedDoctor = await _context.Doctors.FirstOrDefaultAsync(d => d.SpecialtyId == targetSpecialtyId && d.Status == "Active")
+                              ?? await _context.Doctors.FirstOrDefaultAsync(d => d.SpecialtyId == targetSpecialtyId)
+                              ?? await _context.Doctors.FirstOrDefaultAsync(d => d.Status == "Active")
+                              ?? await _context.Doctors.FirstOrDefaultAsync();
+            int validDoctorId = matchedDoctor?.DoctorId ?? 1;
 
             // 4. Safely get a valid, unbooked slot_id from doctor_schedule_slots table
             int validSlotId = 0;
@@ -173,6 +191,7 @@ public class HealthPackagesController : ControllerBase
             // 5. Create appointment record for package booking with EF Save & Raw SQL fallback
             int queueNum = (await _context.Appointments.CountAsync(a => a.PatientId == validPatientId)) + 1;
             int newAppointmentId = 0;
+            string bookingReason = $"{specName} - Gói: {pkg.Title} - {req.PreferredDate ?? DateTime.UtcNow.AddDays(1).ToString("dd/M/yyyy")}";
             try
             {
                 var appointment = new Appointment
@@ -180,7 +199,7 @@ public class HealthPackagesController : ControllerBase
                     PatientId = validPatientId,
                     DoctorId = validDoctorId,
                     SlotId = validSlotId,
-                    Reason = $"{pkg.Title} - {req.PreferredDate ?? DateTime.UtcNow.AddDays(1).ToString("dd/M/yyyy")}",
+                    Reason = bookingReason,
                     Note = $"Gói khám: {pkg.Title} | {FormatPrice(pkg.Price)} | Bệnh nhân: {req.PatientName}",
                     StatusId = 1, // Confirmed
                     QueueNumber = queueNum,
@@ -205,7 +224,7 @@ public class HealthPackagesController : ControllerBase
                 var p1 = rawCmd.CreateParameter(); p1.ParameterName = "@pId"; p1.Value = validPatientId; rawCmd.Parameters.Add(p1);
                 var p2 = rawCmd.CreateParameter(); p2.ParameterName = "@dId"; p2.Value = validDoctorId; rawCmd.Parameters.Add(p2);
                 var p3 = rawCmd.CreateParameter(); p3.ParameterName = "@sId"; p3.Value = validSlotId; rawCmd.Parameters.Add(p3);
-                var p4 = rawCmd.CreateParameter(); p4.ParameterName = "@reason"; p4.Value = $"{pkg.Title} - {req.PreferredDate ?? DateTime.UtcNow.AddDays(1).ToString("dd/M/yyyy")}"; rawCmd.Parameters.Add(p4);
+                var p4 = rawCmd.CreateParameter(); p4.ParameterName = "@reason"; p4.Value = bookingReason; rawCmd.Parameters.Add(p4);
                 var p5 = rawCmd.CreateParameter(); p5.ParameterName = "@qNum"; p5.Value = queueNum; rawCmd.Parameters.Add(p5);
                 var p6 = rawCmd.CreateParameter(); p6.ParameterName = "@note"; p6.Value = $"Gói khám: {pkg.Title} | {FormatPrice(pkg.Price)} | Bệnh nhân: {req.PatientName}"; rawCmd.Parameters.Add(p6);
 

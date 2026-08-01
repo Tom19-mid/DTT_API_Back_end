@@ -226,10 +226,10 @@ public class Doctor
     [StringLength(50)]
     public string? ClinicRoom { get; set; }
 
-    [Column("leave_start_date")]
+    [NotMapped]
     public DateOnly? LeaveStartDate { get; set; }
 
-    [Column("leave_end_date")]
+    [NotMapped]
     public DateOnly? LeaveEndDate { get; set; }
 
     [Column("avatar_url")]
@@ -681,6 +681,9 @@ public class Medicine
     [Column("unit")]
     [StringLength(50)]
     public string Unit { get; set; } = string.Empty;
+
+    [Column("price")]
+    public decimal Price { get; set; } = 15000m;
 
     [Column("description")]
     public string? Description { get; set; }

@@ -20,19 +20,19 @@ public class DoctorsController : ControllerBase
     [HttpGet]
     public async Task<IActionResult> GetDoctors([FromQuery] int? specialtyId)
     {
-        // 0. Auto-cleanup duplicate doctor records (e.g., duplicate Trần Văn C)
-        var dupeExists = await _context.Doctors.AnyAsync(d => d.FullName == "ThS. BS Trần Văn C" && d.DoctorId != 3);
-        if (dupeExists)
+        // 0. Auto-cleanup non-doctor staff records and duplicates from doctors table
+        try
         {
-            try
-            {
-                await _context.Database.ExecuteSqlRawAsync("DELETE FROM doctor_schedule_slots WHERE schedule_id IN (SELECT schedule_id FROM doctor_schedules WHERE doctor_id IN (SELECT doctor_id FROM doctors WHERE full_name = 'ThS. BS Trần Văn C' AND doctor_id <> 3));");
-                await _context.Database.ExecuteSqlRawAsync("DELETE FROM doctor_schedules WHERE doctor_id IN (SELECT doctor_id FROM doctors WHERE full_name = 'ThS. BS Trần Văn C' AND doctor_id <> 3);");
-                await _context.Database.ExecuteSqlRawAsync("DELETE FROM appointments WHERE doctor_id IN (SELECT doctor_id FROM doctors WHERE full_name = 'ThS. BS Trần Văn C' AND doctor_id <> 3);");
-                await _context.Database.ExecuteSqlRawAsync("DELETE FROM doctors WHERE full_name = 'ThS. BS Trần Văn C' AND doctor_id <> 3;");
-            }
-            catch { }
+            await _context.Database.ExecuteSqlRawAsync("DELETE FROM doctor_schedule_slots WHERE schedule_id IN (SELECT schedule_id FROM doctor_schedules WHERE doctor_id IN (SELECT doctor_id FROM doctors WHERE full_name = 'ThS. BS Trần Văn C' AND doctor_id <> 3));");
+            await _context.Database.ExecuteSqlRawAsync("DELETE FROM doctor_schedules WHERE doctor_id IN (SELECT doctor_id FROM doctors WHERE full_name = 'ThS. BS Trần Văn C' AND doctor_id <> 3);");
+            await _context.Database.ExecuteSqlRawAsync("DELETE FROM appointments WHERE doctor_id IN (SELECT doctor_id FROM doctors WHERE full_name = 'ThS. BS Trần Văn C' AND doctor_id <> 3);");
+            await _context.Database.ExecuteSqlRawAsync("DELETE FROM doctors WHERE full_name = 'ThS. BS Trần Văn C' AND doctor_id <> 3;");
+
+            await _context.Database.ExecuteSqlRawAsync("DELETE FROM doctor_schedule_slots WHERE schedule_id IN (SELECT schedule_id FROM doctor_schedules WHERE doctor_id IN (SELECT doctor_id FROM doctors WHERE full_name NOT LIKE '%BS.%' AND full_name NOT LIKE '%Bác sĩ%' AND full_name NOT LIKE '%ThS.%' AND full_name NOT LIKE '%TS.%'));");
+            await _context.Database.ExecuteSqlRawAsync("DELETE FROM doctor_schedules WHERE doctor_id IN (SELECT doctor_id FROM doctors WHERE full_name NOT LIKE '%BS.%' AND full_name NOT LIKE '%Bác sĩ%' AND full_name NOT LIKE '%ThS.%' AND full_name NOT LIKE '%TS.%');");
+            await _context.Database.ExecuteSqlRawAsync("DELETE FROM doctors WHERE full_name NOT LIKE '%BS.%' AND full_name NOT LIKE '%Bác sĩ%' AND full_name NOT LIKE '%ThS.%' AND full_name NOT LIKE '%TS.%';");
         }
+        catch { }
 
         var doctorMasterList = new[]
         {
@@ -133,6 +133,9 @@ public class DoctorsController : ControllerBase
         }
 
         var query = _context.Doctors.AsQueryable();
+        // Strictly include only real doctors (BS., Bác sĩ, ThS., TS.)
+        query = query.Where(d => d.FullName != null && (d.FullName.Contains("BS.") || d.FullName.Contains("Bác sĩ") || d.FullName.Contains("ThS.") || d.FullName.Contains("TS.")));
+
         if (specialtyId.HasValue && specialtyId.Value > 0)
         {
             query = query.Where(d => d.SpecialtyId == specialtyId.Value);
@@ -172,7 +175,9 @@ public class DoctorsController : ControllerBase
             _schedulesSeeded = true;
         }
 
-        var doctors = await _context.Doctors.ToListAsync();
+        var doctors = await _context.Doctors
+            .Where(d => d.FullName != null && (d.FullName.Contains("BS.") || d.FullName.Contains("Bác sĩ") || d.FullName.Contains("ThS.") || d.FullName.Contains("TS.")))
+            .ToListAsync();
 
         if (doctorId.HasValue && doctorId.Value > 0)
         {
@@ -193,7 +198,7 @@ public class DoctorsController : ControllerBase
 
         foreach (var doc in doctors)
         {
-            bool isWorking = CheckDoctorWorkingDay(doc.DoctorId, targetDate);
+            bool isWorking = CheckDoctorWorkingDay(doc.FullName ?? "", doc.DoctorId, targetDate);
             string[] timeSlots = isWorking ? GenerateDoctorTimeSlots(doc.DoctorId, targetDate) : new string[0];
 
             string shiftDescription = "Nghỉ phép (Off)";
@@ -221,11 +226,42 @@ public class DoctorsController : ControllerBase
         return Ok(list);
     }
 
-    private static bool CheckDoctorWorkingDay(int doctorId, DateTime date)
+    private static bool CheckDoctorWorkingDay(string docName, int doctorId, DateTime date)
     {
         var dow = date.DayOfWeek;
-        int pattern = doctorId % 4;
+        string name = docName ?? "";
 
+        if (name.Contains("Nguyễn Văn A"))
+            return dow == DayOfWeek.Monday || dow == DayOfWeek.Wednesday || dow == DayOfWeek.Friday || dow == DayOfWeek.Sunday;
+
+        if (name.Contains("Trịnh Hoàng Minh"))
+            return dow == DayOfWeek.Tuesday || dow == DayOfWeek.Thursday || dow == DayOfWeek.Saturday || dow == DayOfWeek.Sunday;
+
+        if (name.Contains("Lê Thị B") || name.Contains("Lê Hoàng Văn"))
+            return dow == DayOfWeek.Tuesday || dow == DayOfWeek.Thursday || dow == DayOfWeek.Saturday;
+
+        if (name.Contains("Nguyễn Mai Chi"))
+            return dow == DayOfWeek.Monday || dow == DayOfWeek.Wednesday || dow == DayOfWeek.Friday || dow == DayOfWeek.Saturday;
+
+        if (name.Contains("Trần Văn C"))
+            return dow == DayOfWeek.Monday || dow == DayOfWeek.Tuesday || dow == DayOfWeek.Thursday || dow == DayOfWeek.Friday;
+
+        if (name.Contains("Phạm Thị D"))
+            return dow == DayOfWeek.Wednesday || dow == DayOfWeek.Friday || dow == DayOfWeek.Saturday || dow == DayOfWeek.Sunday;
+
+        if (name.Contains("Đỗ Phương Hạnh"))
+            return dow == DayOfWeek.Monday || dow == DayOfWeek.Wednesday || dow == DayOfWeek.Thursday || dow == DayOfWeek.Saturday;
+
+        if (name.Contains("Phạm Tuấn Kiệt"))
+            return dow == DayOfWeek.Tuesday || dow == DayOfWeek.Wednesday || dow == DayOfWeek.Friday || dow == DayOfWeek.Sunday;
+
+        if (name.Contains("Vũ Bích Ngọc"))
+            return dow == DayOfWeek.Monday || dow == DayOfWeek.Tuesday || dow == DayOfWeek.Friday || dow == DayOfWeek.Saturday;
+
+        if (name.Contains("Hoàng Văn Long"))
+            return dow >= DayOfWeek.Monday && dow <= DayOfWeek.Friday;
+
+        int pattern = doctorId % 4;
         switch (pattern)
         {
             case 1: // Group A: Mon, Wed, Fri, Sun
@@ -293,7 +329,7 @@ public class DoctorsController : ControllerBase
 
                 foreach (var doc in doctors)
                 {
-                    bool isOnDuty = CheckDoctorWorkingDay(doc.DoctorId, workDate);
+                    bool isOnDuty = CheckDoctorWorkingDay(doc.FullName ?? "", doc.DoctorId, workDate);
                     if (isOnDuty)
                     {
                         using var insCmd = conn.CreateCommand();

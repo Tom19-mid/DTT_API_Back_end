@@ -145,11 +145,13 @@ public class MedicalRecordsController : ControllerBase
             }
             // Fallback mock data removed
 
-            // 3. Hoa don (Invoices)
+            // 3. Hoa don (Invoices) - Chi hien thi hoa don DA THANH TOAN (paid)
+            // Invoice "pending" chi hien o man hinh Le Tan, khong hien tren App Mobile
             var invoices = await _context.Invoices
-                .Where(i => i.PatientId == patientId)
+                .Where(i => i.PatientId == patientId && i.PaymentStatus == "paid")
                 .OrderByDescending(i => i.InvoiceDate)
                 .ToListAsync();
+
 
             var hoaDon = new List<object>();
             foreach (var inv in invoices)
@@ -184,6 +186,74 @@ public class MedicalRecordsController : ControllerBase
         catch (Exception ex)
         {
             return StatusCode(500, new { success = false, message = "Lỗi lấy hồ sơ: " + ex.Message });
+        }
+    }
+
+    // GET /api/MedicalRecords/all
+    [HttpGet("all")]
+    public async Task<IActionResult> GetAllMedicalRecords([FromQuery] string? search, [FromQuery] int? doctorId)
+    {
+        try
+        {
+            var query = _context.MedicalRecords.AsQueryable();
+            if (doctorId.HasValue && doctorId.Value > 0)
+            {
+                query = query.Where(r => r.DoctorId == doctorId.Value);
+            }
+            var records = await query.OrderByDescending(r => r.ExaminationDate).ToListAsync();
+
+            var result = new List<object>();
+            var docMap = await _context.Doctors.ToDictionaryAsync(d => d.DoctorId, d => d.FullName ?? "Bác sĩ");
+            var patientMap = await _context.Patients.ToDictionaryAsync(p => p.PatientId, p => p.FullName ?? "Bệnh nhân");
+            var patientPhoneMap = await _context.Patients.ToDictionaryAsync(p => p.PatientId, p => p.PhoneNumber ?? "");
+
+            foreach (var r in records)
+            {
+                string pName = patientMap.ContainsKey(r.PatientId) ? patientMap[r.PatientId] : "Bệnh nhân";
+                string pPhone = patientPhoneMap.ContainsKey(r.PatientId) ? patientPhoneMap[r.PatientId] : "";
+                string dName = docMap.ContainsKey(r.DoctorId) ? docMap[r.DoctorId] : "BS. Nguyễn Văn A";
+                var rx = await _context.Prescriptions.FirstOrDefaultAsync(p => p.MedicalRecordId == r.MedicalRecordId);
+                var rxDetails = rx != null ? await _context.PrescriptionDetails.Where(d => d.PrescriptionId == rx.PrescriptionId).ToListAsync() : new List<PrescriptionDetail>();
+
+                if (!string.IsNullOrEmpty(search))
+                {
+                    string s = search.ToLower();
+                    bool matchName = pName.ToLower().Contains(s);
+                    bool matchPhone = pPhone.ToLower().Contains(s);
+                    bool matchDiag = (r.Diagnosis ?? "").ToLower().Contains(s);
+                    bool matchCode = (r.IcdCode ?? "").ToLower().Contains(s);
+                    if (!matchName && !matchPhone && !matchDiag && !matchCode) continue;
+                }
+
+                result.Add(new
+                {
+                    medicalRecordId = r.MedicalRecordId,
+                    appointmentId = r.AppointmentId,
+                    patientId = r.PatientId,
+                    patientName = pName,
+                    phoneNumber = pPhone,
+                    doctorId = r.DoctorId,
+                    doctorName = dName,
+                    examinationDate = r.ExaminationDate.ToString("dd/MM/yyyy HH:mm"),
+                    symptoms = r.Symptoms ?? "",
+                    diagnosis = r.Diagnosis ?? "",
+                    treatmentPlan = r.TreatmentPlan ?? "",
+                    icdCode = r.IcdCode ?? "",
+                    pulse = r.HeartRate?.ToString() ?? "",
+                    bloodPressure = r.BloodPressure ?? "",
+                    temperature = r.Temperature?.ToString() ?? "",
+                    weight = r.Weight?.ToString() ?? "",
+                    bmi = r.Bmi?.ToString() ?? "",
+                    prescriptionsCount = rxDetails.Count,
+                    prescriptionsSummary = string.Join(", ", rxDetails.Select(d => $"{d.MedicineNameSnapshot} ({d.Quantity} {d.UnitSnapshot})"))
+                });
+            }
+
+            return Ok(result);
+        }
+        catch (Exception ex)
+        {
+            return StatusCode(500, new { message = ex.Message });
         }
     }
 
@@ -399,36 +469,74 @@ public class MedicalRecordsController : ControllerBase
                 await _context.SaveChangesAsync();
             }
 
-            // 4. Automatically generate Invoice for completed examination
-            var invoice = new Invoice
+            // 4. Tao Invoice PENDING (cho thu phi) - khong tao invoice da thanh toan
+            // Le tan phai bam "Xac nhan thu tien" moi chuyen sang "paid" va hien tren App Mobile
+            var existingInvoice = await _context.Invoices.FirstOrDefaultAsync(i => i.AppointmentId == dto.AppointmentId);
+            if (existingInvoice == null)
             {
-                AppointmentId = dto.AppointmentId,
-                PatientId = dto.PatientId,
-                TotalAmount = 250000,
-                PaidAmount = 250000,
-                PaymentStatus = "paid",
-                PaymentMethod = "Thanh toán viện phí",
-                InvoiceDate = DateTime.UtcNow,
-                CreatedAt = DateTime.UtcNow,
-                UpdatedAt = DateTime.UtcNow
-            };
-            _context.Invoices.Add(invoice);
-            await _context.SaveChangesAsync();
+                // Tinh tong tien tu don thuoc (uoc tinh 15.000/vien - Medicine entity chua co truong Price)
+                decimal medFee = 0;
+                if (dto.Prescriptions != null && dto.Prescriptions.Count > 0)
+                {
+                    var medIds = dto.Prescriptions.Select(p => p.MedicineId).ToList();
+                    var medDict = await _context.Medicines.Where(m => medIds.Contains(m.MedicineId)).ToDictionaryAsync(m => m.MedicineId);
+                    foreach (var presc in dto.Prescriptions)
+                    {
+                        decimal price = medDict.ContainsKey(presc.MedicineId) ? medDict[presc.MedicineId].Price : 15000m;
+                        if (price <= 0) price = 15000m;
+                        medFee += price * presc.Quantity;
+                    }
+                }
+                decimal examFee = 250000; // Cong kham chuyen khoa chieu chuot 250.000d
+                decimal totalAmount = examFee + medFee;
 
-            _context.InvoiceItems.Add(new InvoiceItem
-            {
-                InvoiceId = invoice.InvoiceId,
-                ItemName = "Chi phí khám chuyên khoa & Dịch vụ y tế",
-                ItemType = "Consultation",
-                Quantity = 1,
-                UnitPrice = 250000,
-                Amount = 250000,
-                CreatedAt = DateTime.UtcNow,
-                UpdatedAt = DateTime.UtcNow
-            });
-            await _context.SaveChangesAsync();
+                var pendingInvoice = new Invoice
+                {
+                    AppointmentId = dto.AppointmentId,
+                    PatientId = dto.PatientId,
+                    TotalAmount = totalAmount,
+                    PaidAmount = 0,           // Chua thu tien
+                    PaymentStatus = "pending", // Le tan chua xac nhan
+                    PaymentMethod = null,
+                    InvoiceDate = DateTime.UtcNow,
+                    CreatedAt = DateTime.UtcNow,
+                    UpdatedAt = DateTime.UtcNow
+                };
+                _context.Invoices.Add(pendingInvoice);
+                await _context.SaveChangesAsync();
 
-            return Ok(new { success = true, medicalRecordId = record.MedicalRecordId, invoiceId = invoice.InvoiceId });
+                _context.InvoiceItems.Add(new InvoiceItem
+                {
+                    InvoiceId = pendingInvoice.InvoiceId,
+                    ItemName = "Chi phi kham chuyen khoa & Dich vu y te",
+                    ItemType = "Consultation",
+                    Quantity = 1,
+                    UnitPrice = examFee,
+                    Amount = examFee,
+                    CreatedAt = DateTime.UtcNow,
+                    UpdatedAt = DateTime.UtcNow
+                });
+                if (medFee > 0)
+                {
+                    _context.InvoiceItems.Add(new InvoiceItem
+                    {
+                        InvoiceId = pendingInvoice.InvoiceId,
+                        ItemName = "Phi thuoc theo Don thuoc dien tu",
+                        ItemType = "Medicine",
+                        Quantity = dto.Prescriptions?.Count ?? 0,
+                        UnitPrice = medFee,
+                        Amount = medFee,
+                        CreatedAt = DateTime.UtcNow,
+                        UpdatedAt = DateTime.UtcNow
+                    });
+                }
+                await _context.SaveChangesAsync();
+            }
+            // Neu da co invoice (vi du chay lai), khong cap nhat gi - giu nguyen trang thai
+
+
+            return Ok(new { success = true, medicalRecordId = record.MedicalRecordId });
+
         }
         catch (Exception ex)
         {

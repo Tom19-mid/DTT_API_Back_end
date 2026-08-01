@@ -30,10 +30,13 @@ public class AppointmentsController : ControllerBase
             if (statusCount == 0)
             {
                 _context.AppointmentStatuses.AddRange(
-                    new AppointmentStatus { StatusId = 1, StatusName = "Confirmed" },
-                    new AppointmentStatus { StatusId = 2, StatusName = "Completed" },
-                    new AppointmentStatus { StatusId = 3, StatusName = "Cancelled" },
-                    new AppointmentStatus { StatusId = 4, StatusName = "InProgress" }
+                    new AppointmentStatus { StatusId = 1, StatusName = "Scheduled" },
+                    new AppointmentStatus { StatusId = 2, StatusName = "Waiting" },
+                    new AppointmentStatus { StatusId = 3, StatusName = "InProgress" },
+                    new AppointmentStatus { StatusId = 4, StatusName = "Completed" },
+                    new AppointmentStatus { StatusId = 5, StatusName = "Cancelled" },
+                    new AppointmentStatus { StatusId = 6, StatusName = "NoShow" },
+                    new AppointmentStatus { StatusId = 7, StatusName = "CheckedIn" }
                 );
                 await _context.SaveChangesAsync();
             }
@@ -252,11 +255,32 @@ public class AppointmentsController : ControllerBase
     }
 
     [HttpGet]
-    public async Task<IActionResult> GetAllAppointments()
+    public async Task<IActionResult> GetAllAppointments([FromQuery] int? doctorId, [FromQuery] string? date, [FromQuery] bool? todayOnly)
     {
         try
         {
-            var list = await _context.Appointments
+            var query = _context.Appointments.AsQueryable();
+
+            if (doctorId.HasValue && doctorId.Value > 0)
+            {
+                // Bác sĩ nhìn thấy các bệnh nhân đã Check-in (7), Đang khám (3), Đã hoàn thành (4), Hủy (5)
+                query = query.Where(a => a.DoctorId == doctorId.Value && a.StatusId != 1);
+            }
+
+            if (todayOnly == true || date == "today")
+            {
+                // Lọc các ca khám được tạo hoặc cập nhật trong ngày hôm nay (tính theo UTC/UTC+7)
+                var todayUtc = DateTime.UtcNow.Date.AddDays(-1);
+                query = query.Where(a => a.CreatedAt >= todayUtc || a.UpdatedAt >= todayUtc);
+            }
+            else if (!string.IsNullOrEmpty(date) && DateTime.TryParse(date, out DateTime filterDate))
+            {
+                var startDate = filterDate.Date.AddDays(-1);
+                var endDate = filterDate.Date.AddDays(2);
+                query = query.Where(a => a.CreatedAt >= startDate && a.CreatedAt < endDate);
+            }
+
+            var list = await query
                 .OrderByDescending(a => a.CreatedAt)
                 .ToListAsync();
 
@@ -266,6 +290,64 @@ public class AppointmentsController : ControllerBase
         {
             Console.WriteLine("GetAllAppointments error: " + ex.Message);
             return Ok(new List<AppointmentResponseDto>());
+        }
+    }
+
+    // POST /api/appointments/{id}/checkin — Lễ Tân xác nhận Check-in bệnh nhân
+    [HttpPost("{id}/checkin")]
+    public async Task<IActionResult> CheckInAppointment(int id)
+    {
+        try
+        {
+            var appt = await _context.Appointments.FirstOrDefaultAsync(a => a.AppointmentId == id);
+            if (appt == null) return NotFound(new { success = false, message = "Không tìm thấy lịch hẹn." });
+
+            // Chỉ cho phép check-in khi đang ở trạng thái Confirmed (chưa đến)
+            if (appt.StatusId != 1 && appt.StatusId != 2 && appt.StatusId != 7)
+            {
+                return BadRequest(new { success = false, message = "Lịch hẹn không ở trạng thái hợp lệ để Check-in." });
+            }
+
+            // Đảm bảo appointment_statuses có status_id=7
+            var hasCheckedIn = await _context.AppointmentStatuses.AnyAsync(s => s.StatusId == 7);
+            if (!hasCheckedIn)
+            {
+                _context.AppointmentStatuses.Add(new AppointmentStatus { StatusId = 7, StatusName = "CheckedIn" });
+                await _context.SaveChangesAsync();
+            }
+
+            appt.StatusId = 7; // CheckedIn → chuyển sang Hàng chờ lâm sàng của Bác sĩ
+            appt.UpdatedAt = DateTime.UtcNow;
+
+            // Lấy thông tin bệnh nhân để gửi thông báo
+            var patient = await _context.Patients.FirstOrDefaultAsync(p => p.PatientId == appt.PatientId);
+            if (patient != null && patient.UserId != Guid.Empty)
+            {
+                _context.Notifications.Add(new Notification
+                {
+                    UserId = patient.UserId,
+                    Title = "✅ Đã Check-in thành công tại Lễ Tân",
+                    Content = $"Hồ sơ của bạn ({patient.FullName}) đã được Lễ Tân Bệnh viện DTT Healthcare xác nhận Check-in và cấp Số Thứ Tự. Vui lòng ngồi chờ tại khu vực phòng khám được chỉ định và theo dõi màn hình gọi số.",
+                    Type = "appointment",
+                    IsRead = false,
+                    CreatedAt = DateTime.UtcNow
+                });
+            }
+
+            await _context.SaveChangesAsync();
+
+            return Ok(new
+            {
+                success = true,
+                message = "Check-in thành công! Bệnh nhân đã được đưa vào Hàng chờ lâm sàng của Bác sĩ.",
+                appointmentId = id,
+                status = "CheckedIn",
+                queueNumber = appt.QueueNumber
+            });
+        }
+        catch (Exception ex)
+        {
+            return StatusCode(500, new { success = false, message = ex.Message });
         }
     }
 
@@ -282,6 +364,9 @@ public class AppointmentsController : ControllerBase
 
         var specialtyIds = doctors.Values.Where(d => d.SpecialtyId.HasValue).Select(d => d.SpecialtyId.Value).Distinct().ToList();
         var specialties = await _context.Specialties.Where(s => specialtyIds.Contains(s.SpecialtyId)).ToDictionaryAsync(s => s.SpecialtyId);
+
+        var apptIds = list.Select(a => a.AppointmentId).ToList();
+        var invoiceMap = await _context.Invoices.Where(i => apptIds.Contains(i.AppointmentId)).ToDictionaryAsync(i => i.AppointmentId);
 
         foreach (var appt in list)
         {
@@ -304,9 +389,13 @@ public class AppointmentsController : ControllerBase
 
             bool isPkg = appt.Note?.Contains("Gói khám:") == true || docName == "Gói Khám Sức Khỏe" || appt.Reason?.Contains("Tầm soát") == true || appt.Reason?.Contains("Khám Tổng Quát") == true;
 
-            // Extract fee from Note if available
+            // Lấy tổng viện phí thực tế từ Hóa đơn (bao gồm Công khám + Phí thuốc do Bác sĩ kê)
             string feeStr = "250.000đ";
-            if (!string.IsNullOrEmpty(appt.Note) && appt.Note.Contains("|"))
+            if (invoiceMap.ContainsKey(appt.AppointmentId))
+            {
+                feeStr = $"{invoiceMap[appt.AppointmentId].TotalAmount:N0}đ";
+            }
+            else if (!string.IsNullOrEmpty(appt.Note) && appt.Note.Contains("|"))
             {
                 var parts = appt.Note.Split('|');
                 foreach (var p in parts)
@@ -374,7 +463,8 @@ public class AppointmentsController : ControllerBase
             else if (appt.StatusId == 5) statusStr = "Cancelled";
             else if (appt.StatusId == 4) statusStr = "Completed";
             else if (appt.StatusId == 3) statusStr = "InProgress";
-            else if (appt.StatusId == 2 || appt.StatusId == 1) statusStr = "Confirmed";
+            else if (appt.StatusId == 7) statusStr = "CheckedIn"; // Lễ Tân đã Check-in → chờ bác sĩ khám
+            else if (appt.StatusId == 2 || appt.StatusId == 1) statusStr = "Confirmed"; // Chờ bệnh nhân đến Lễ Tân
 
             if ((appt.StatusId == 1 || appt.StatusId == 2 || appt.StatusId == 3) && !string.IsNullOrEmpty(dateStr))
             {
@@ -419,7 +509,7 @@ public class AppointmentsController : ControllerBase
             var appt = await _context.Appointments.FirstOrDefaultAsync(a => a.AppointmentId == id);
             if (appt != null)
             {
-                appt.StatusId = 3; // 3 = Cancelled
+                appt.StatusId = 5; // 5 = Cancelled
                 appt.CancelledAt = DateTime.UtcNow;
                 // Store who cancelled inside CancelReason (CancelledBy is uuid type, cannot store text)
                 var cancellerInfo = !string.IsNullOrEmpty(req?.CancelledBy)
@@ -503,6 +593,10 @@ public class AppointmentsController : ControllerBase
                         });
                     }
                 }
+                else if (status == "CheckedIn" || status == "7")
+                {
+                    appt.StatusId = 7; // 7 = CheckedIn
+                }
                 else if (status == "NoShow" || status == "6")
                 {
                     appt.StatusId = 6; // 6 = NoShow
@@ -514,6 +608,7 @@ public class AppointmentsController : ControllerBase
                 await _context.SaveChangesAsync();
                 return Ok(new { success = true, message = $"Cập nhật trạng thái thành [{status}] trực tiếp vào CSDL." });
             }
+
             return NotFound(new { success = false, message = "Không tìm thấy lịch khám trong CSDL." });
         }
         catch (Exception ex)
