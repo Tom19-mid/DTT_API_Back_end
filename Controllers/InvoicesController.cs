@@ -2,6 +2,7 @@ using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using DTT_Backend_API.Data;
 using DTT_Backend_API.Models;
+using System.Linq;
 
 namespace DTT_Backend_API.Controllers;
 
@@ -14,6 +15,88 @@ public class InvoicesController : ControllerBase
     public InvoicesController(AppDbContext context)
     {
         _context = context;
+    }
+
+    // GET /api/Invoices/estimate/{appointmentId}
+    // Trả về phí khám + phí thuốc THẬT tính từ đơn thuốc điện tử (prescription_details x medicines.unit_price)
+    // Dùng để hiển thị đúng số tiền trên màn Thanh Toán TRƯỚC khi Lễ Tân bấm xác nhận thu tiền.
+    [HttpGet("estimate/{appointmentId}")]
+    public async Task<IActionResult> GetEstimate(int appointmentId)
+    {
+        var appt = await _context.Appointments.FirstOrDefaultAsync(a => a.AppointmentId == appointmentId);
+        if (appt == null) return NotFound(new { success = false, message = "Không tìm thấy lịch hẹn." });
+
+        // Gói khám sức khỏe có giá TRỌN GÓI riêng (vd: 1.200.000đ) cho các hạng mục nằm TRONG gói,
+        // khác hẳn mô hình "phí khám 250k" của ca khám chuyên khoa thông thường.
+        // LƯU Ý: giá gói KHÔNG tự động bao gồm thuốc — nếu bác sĩ kê thêm thuốc ngoài phạm vi gói
+        // (vd: giảm đau cho chẩn đoán phát sinh), vẫn phải cộng thêm đúng chi phí thuốc thật đó,
+        // không được mặc định = 0 (nếu không sẽ vô tình phát thuốc miễn phí cho bệnh nhân).
+        bool isPackage = appt.Note?.Contains("Gói khám:") == true;
+        decimal examFee = isPackage ? (ExtractPriceFromNote(appt.Note) ?? 250000m) : 250000m;
+        decimal servicesFee = await ComputeClsFeeAsync(appointmentId);
+        decimal medsFee = await ComputeMedsFeeAsync(appointmentId);
+
+        return Ok(new
+        {
+            success = true,
+            appointmentId,
+            isPackage,
+            examFee,
+            servicesFee,
+            medsFee,
+            totalAmount = examFee + servicesFee + medsFee,
+            hasPrescription = medsFee > 0
+        });
+    }
+
+    // Đọc giá tiền THẬT được lưu trong appointments.note lúc đặt gói khám:
+    // "Gói khám: {title} | {giá đã format vd 1.200.000đ} | Bệnh nhân: {tên}"
+    private static decimal? ExtractPriceFromNote(string? note)
+    {
+        if (string.IsNullOrEmpty(note) || !note.Contains("|")) return null;
+        foreach (var part in note.Split('|'))
+        {
+            var trimmed = part.Trim();
+            if (trimmed.EndsWith("đ") || trimmed.EndsWith("VNĐ") || trimmed.Contains(".000"))
+            {
+                var digits = new string(trimmed.Where(char.IsDigit).ToArray());
+                if (decimal.TryParse(digits, out decimal val) && val > 0) return val;
+            }
+        }
+        return null;
+    }
+
+    // Tính tổng tiền thuốc thật từ đơn thuốc điện tử gắn với appointment (nếu có)
+    private async Task<decimal> ComputeMedsFeeAsync(int appointmentId)
+    {
+        var medRecord = await _context.MedicalRecords.FirstOrDefaultAsync(r => r.AppointmentId == appointmentId);
+        if (medRecord == null) return 0m;
+
+        var prescription = await _context.Prescriptions.FirstOrDefaultAsync(p => p.MedicalRecordId == medRecord.MedicalRecordId);
+        if (prescription == null) return 0m;
+
+        var details = await _context.PrescriptionDetails.Where(d => d.PrescriptionId == prescription.PrescriptionId).ToListAsync();
+        if (details.Count == 0) return 0m;
+
+        var medIds = details.Select(d => d.MedicineId).ToList();
+        var medDict = await _context.Medicines.Where(m => medIds.Contains(m.MedicineId)).ToDictionaryAsync(m => m.MedicineId);
+        return details.Sum(d => d.Quantity * (medDict.ContainsKey(d.MedicineId) && medDict[d.MedicineId].Price > 0 ? medDict[d.MedicineId].Price : 15000m));
+    }
+
+    // Tính phí Xét nghiệm/Siêu âm THẬT đã được Bác sĩ chỉ định (medical_services.price qua service_id) —
+    // trước đây servicesFee luôn = 0 cố định ở đây dù ConfirmPayment đã có sẵn tham số ServicesFee,
+    // khiến phí CLS bị "biến mất" khỏi hóa đơn cuối cùng dù đã được cộng lúc bác sĩ hoàn tất khám.
+    private async Task<decimal> ComputeClsFeeAsync(int appointmentId)
+    {
+        var medRecord = await _context.MedicalRecords.FirstOrDefaultAsync(r => r.AppointmentId == appointmentId);
+        if (medRecord == null) return 0m;
+
+        var serviceIds = new List<int>();
+        serviceIds.AddRange(await _context.MedicalTests.Where(t => t.MedicalRecordId == medRecord.MedicalRecordId && t.ServiceId != null).Select(t => t.ServiceId!.Value).ToListAsync());
+        serviceIds.AddRange(await _context.UltrasoundResults.Where(u => u.MedicalRecordId == medRecord.MedicalRecordId && u.ServiceId != null).Select(u => u.ServiceId!.Value).ToListAsync());
+        if (serviceIds.Count == 0) return 0m;
+
+        return await _context.ClinicalServices.Where(s => serviceIds.Contains(s.ServiceId)).SumAsync(s => s.UnitPrice);
     }
 
     // POST /api/Invoices/confirm-payment
@@ -38,27 +121,16 @@ public class InvoicesController : ControllerBase
 
             // 3. Tính tổng tiền từ các khoản (khám + CLS + thuốc)
             decimal examFee = dto.ExamFee > 0 ? dto.ExamFee : 250000m;
-            decimal servicesFee = dto.ServicesFee > 0 ? dto.ServicesFee : 0m;
+            decimal servicesFee = dto.ServicesFee > 0 ? dto.ServicesFee : await ComputeClsFeeAsync(dto.AppointmentId);
             decimal medsFee = dto.MedsFee > 0 ? dto.MedsFee : 0m;
-            decimal totalAmount = examFee + servicesFee + medsFee;
 
-            // 4. Nếu có đơn thuốc, tính thêm chi phí thuốc từ prescription
+            // 4. Nếu Lễ Tân không truyền medsFee (hoặc =0), tính lại từ đơn thuốc điện tử thật trong DB
             if (dto.AppointmentId > 0 && medsFee == 0)
             {
-                var medRecord = await _context.MedicalRecords.FirstOrDefaultAsync(r => r.AppointmentId == dto.AppointmentId);
-                if (medRecord != null)
-                {
-                    var prescription = await _context.Prescriptions.FirstOrDefaultAsync(p => p.MedicalRecordId == medRecord.MedicalRecordId);
-                    if (prescription != null)
-                    {
-                        var details = await _context.PrescriptionDetails.Where(d => d.PrescriptionId == prescription.PrescriptionId).ToListAsync();
-                        var medIds = details.Select(d => d.MedicineId).ToList();
-                        var medDict = await _context.Medicines.Where(m => medIds.Contains(m.MedicineId)).ToDictionaryAsync(m => m.MedicineId);
-                        medsFee = details.Sum(d => d.Quantity * (medDict.ContainsKey(d.MedicineId) && medDict[d.MedicineId].Price > 0 ? medDict[d.MedicineId].Price : 15000m));
-                        totalAmount = examFee + servicesFee + medsFee;
-                    }
-                }
+                medsFee = await ComputeMedsFeeAsync(dto.AppointmentId);
             }
+
+            decimal totalAmount = examFee + servicesFee + medsFee;
 
             Invoice invoice;
 
@@ -123,12 +195,13 @@ public class InvoicesController : ControllerBase
             invoice.UpdatedAt = DateTime.UtcNow;
             await _context.SaveChangesAsync();
 
-            // Cập nhật appointment status → Paid
-            if (appt.StatusId != 5) // 5 = Paid
-            {
-                appt.StatusId = 5;
-                appt.UpdatedAt = DateTime.UtcNow;
-            }
+            // LƯU Ý: KHÔNG đổi appt.StatusId ở đây nữa. Trước đây code gán appt.StatusId = 5 với ý định
+            // đánh dấu "Paid", nhưng trong bảng appointment_statuses thật, status_id=5 nghĩa là "Cancelled"!
+            // Hậu quả: mọi nơi hiển thị (App Mobile, WinForms) đọc appointment status_id=5 sẽ hiểu nhầm
+            // lịch hẹn đã bị HỦY. Đồng thời status_id đó rất dễ bị ghi đè lại (vd: bác sĩ lưu lại bệnh án
+            // sẽ set về 4=Completed), khiến hóa đơn ĐÃ THANH TOÁN bị hiện lại như "chưa thu phí" trên màn
+            // Lễ Tân. Trạng thái thanh toán giờ chỉ cần đọc từ invoices.payment_status (nguồn dữ liệu thật
+            // duy nhất) — xem AppointmentResponseDto.PaymentStatus.
 
             // 7. Gửi thông báo lên App Mobile của bệnh nhân
             if (patient != null && patient.UserId != Guid.Empty)
@@ -297,44 +370,74 @@ public class InvoicesController : ControllerBase
                     var conn = _context.Database.GetDbConnection();
                     if (conn.State != System.Data.ConnectionState.Open) await conn.OpenAsync();
 
+                    // CHỈ chọn slot đang RẢNH (không bị appointment active nào chiếm) — trước đây dùng
+                    // "ORDER BY slot_id DESC LIMIT 1" lấy bừa slot mới nhất của bác sĩ bất kể còn trống
+                    // hay không, nên khi bác sĩ đã có 1 lịch hẹn active dùng đúng slot đó, lần đăng ký
+                    // vãng lai tiếp theo cho cùng bác sĩ sẽ đụng UNIQUE constraint idx_appointments_slot_active.
                     using var slotCmd = conn.CreateCommand();
-                    slotCmd.CommandText = $"SELECT s.slot_id FROM doctor_schedule_slots s JOIN doctor_schedules ds ON s.schedule_id = ds.schedule_id WHERE ds.doctor_id = {dto.DoctorId} AND s.slot_id NOT IN (SELECT slot_id FROM appointments WHERE slot_id IS NOT NULL) LIMIT 1";
+                    slotCmd.CommandText = @"
+                        SELECT s.slot_id
+                        FROM doctor_schedule_slots s
+                        JOIN doctor_schedules ds ON s.schedule_id = ds.schedule_id
+                        WHERE ds.doctor_id = @docId
+                          AND s.slot_id NOT IN (SELECT slot_id FROM appointments WHERE slot_id IS NOT NULL AND is_active = true)
+                        ORDER BY s.slot_id DESC
+                        LIMIT 1";
+                    var pDoc = slotCmd.CreateParameter(); pDoc.ParameterName = "@docId"; pDoc.Value = dto.DoctorId; slotCmd.Parameters.Add(pDoc);
                     var val = await slotCmd.ExecuteScalarAsync();
                     if (val != null && val != DBNull.Value) validSlotId = Convert.ToInt32(val);
 
                     if (validSlotId == 0)
                     {
-                        using var anySlot = conn.CreateCommand();
-                        anySlot.CommandText = "SELECT slot_id FROM doctor_schedule_slots WHERE slot_id NOT IN (SELECT slot_id FROM appointments WHERE slot_id IS NOT NULL) LIMIT 1";
-                        var val2 = await anySlot.ExecuteScalarAsync();
-                        if (val2 != null && val2 != DBNull.Value) validSlotId = Convert.ToInt32(val2);
-                    }
+                        int scId = 0;
+                        using var schedCheck = conn.CreateCommand();
+                        schedCheck.CommandText = "SELECT schedule_id FROM doctor_schedules WHERE doctor_id = @docId LIMIT 1";
+                        var pDoc2 = schedCheck.CreateParameter(); pDoc2.ParameterName = "@docId"; pDoc2.Value = dto.DoctorId; schedCheck.Parameters.Add(pDoc2);
+                        var scVal = await schedCheck.ExecuteScalarAsync();
+                        if (scVal != null && scVal != DBNull.Value) scId = Convert.ToInt32(scVal);
 
-                    if (validSlotId == 0)
-                    {
-                        using var schedCmd = conn.CreateCommand();
-                        schedCmd.CommandText = $"INSERT INTO doctor_schedules (doctor_id, work_date, start_time, end_time) VALUES ({dto.DoctorId}, CURRENT_DATE, '08:00:00', '17:00:00') RETURNING schedule_id";
-                        var scRes = await schedCmd.ExecuteScalarAsync();
-                        int scId = scRes != null && scRes != DBNull.Value ? Convert.ToInt32(scRes) : 1;
+                        if (scId == 0)
+                        {
+                            using var schedCmd = conn.CreateCommand();
+                            schedCmd.CommandText = "INSERT INTO doctor_schedules (doctor_id, work_date, start_time, end_time) VALUES (@docId, CURRENT_DATE, '08:00:00', '17:00:00') RETURNING schedule_id";
+                            var pDoc3 = schedCmd.CreateParameter(); pDoc3.ParameterName = "@docId"; pDoc3.Value = dto.DoctorId; schedCmd.Parameters.Add(pDoc3);
+                            var scRes = await schedCmd.ExecuteScalarAsync();
+                            if (scRes != null && scRes != DBNull.Value) scId = Convert.ToInt32(scRes);
+                        }
 
-                        using var insSlot = conn.CreateCommand();
-                        insSlot.CommandText = $"INSERT INTO doctor_schedule_slots (schedule_id, slot_order, start_time, end_time, status) VALUES ({scId}, 1, '08:00:00', '17:00:00', 'Available') RETURNING slot_id";
-                        var slRes = await insSlot.ExecuteScalarAsync();
-                        if (slRes != null && slRes != DBNull.Value) validSlotId = Convert.ToInt32(slRes);
+                        if (scId > 0)
+                        {
+                            // Tính slot_order kế tiếp thay vì hardcode 1 — tránh đụng UNIQUE (schedule_id, slot_order)
+                            // khi schedule đó đã có sẵn slot từ lần đăng ký trước.
+                            using var insSlot = conn.CreateCommand();
+                            insSlot.CommandText = @"
+                                INSERT INTO doctor_schedule_slots (schedule_id, slot_order, start_time, end_time, status)
+                                VALUES (@scId, (SELECT COALESCE(MAX(slot_order), 0) + 1 FROM doctor_schedule_slots WHERE schedule_id = @scId), '08:00:00', '17:00:00', 'Available')
+                                RETURNING slot_id";
+                            var pSc = insSlot.CreateParameter(); pSc.ParameterName = "@scId"; pSc.Value = scId; insSlot.Parameters.Add(pSc);
+                            var slRes = await insSlot.ExecuteScalarAsync();
+                            if (slRes != null && slRes != DBNull.Value) validSlotId = Convert.ToInt32(slRes);
+                        }
                     }
                 }
-                catch { }
-                if (validSlotId == 0) validSlotId = 1;
+                catch (Exception ex)
+                {
+                    Console.WriteLine("RegisterWalkIn slot lookup exception: " + ex.Message);
+                }
 
+                var todayVn = DateOnly.FromDateTime(DateTime.UtcNow.AddHours(7));
                 var newAppt = new Appointment
                 {
                     PatientId = targetPatientId,
                     DoctorId = dto.DoctorId,
-                    SlotId = validSlotId,
+                    // slot_id có FOREIGN KEY tới doctor_schedule_slots — để NULL nếu không tạo được slot nào
+                    // hợp lệ, thay vì fallback cứng về 1 (gần như chắc chắn đã bị chiếm hoặc không tồn tại).
+                    SlotId = validSlotId > 0 ? validSlotId : (int?)null,
                     StatusId = 7, // CheckedIn ngay vì lễ tân đã xác nhận
                     QueueNumber = await _context.Appointments.CountAsync(a => a.DoctorId == dto.DoctorId && a.StatusId == 7) + 1,
                     Reason = $"Khám vãng lai - {dto.SpecialtyName}",
                     Note = $"Bệnh nhân vãng lai đăng ký tại quầy lễ tân | CCCD: {dto.CccdNumber}",
+                    AppointmentDate = todayVn,
                     IsActive = true,
                     CreatedAt = DateTime.UtcNow,
                     UpdatedAt = DateTime.UtcNow
@@ -355,11 +458,25 @@ public class InvoicesController : ControllerBase
                         var conn = _context.Database.GetDbConnection();
                         if (conn.State != System.Data.ConnectionState.Open) await conn.OpenAsync();
                         using var rawCmd = conn.CreateCommand();
-                        rawCmd.CommandText = $"INSERT INTO appointments (patient_id, doctor_id, slot_id, status_id, queue_number, reason, note, is_active, created_at, updated_at) VALUES ({targetPatientId}, {dto.DoctorId}, {validSlotId}, 7, {newAppt.QueueNumber}, 'Khám vãng lai', 'Đăng ký tại quầy Lễ Tân', true, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP) RETURNING appointment_id";
+                        rawCmd.CommandText = @"
+                            INSERT INTO appointments (patient_id, doctor_id, slot_id, status_id, queue_number, reason, note, is_active, appointment_date, created_at, updated_at) 
+                            VALUES (@pId, @dId, @sId, 7, @qNum, @reason, @note, true, CURRENT_DATE, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP) 
+                            RETURNING appointment_id";
+
+                        var p1 = rawCmd.CreateParameter(); p1.ParameterName = "@pId"; p1.Value = targetPatientId; rawCmd.Parameters.Add(p1);
+                        var p2 = rawCmd.CreateParameter(); p2.ParameterName = "@dId"; p2.Value = dto.DoctorId; rawCmd.Parameters.Add(p2);
+                        var p3 = rawCmd.CreateParameter(); p3.ParameterName = "@sId"; p3.Value = validSlotId > 0 ? validSlotId : (object)DBNull.Value; rawCmd.Parameters.Add(p3);
+                        var p4 = rawCmd.CreateParameter(); p4.ParameterName = "@qNum"; p4.Value = newAppt.QueueNumber; rawCmd.Parameters.Add(p4);
+                        var p5 = rawCmd.CreateParameter(); p5.ParameterName = "@reason"; p5.Value = $"Khám vãng lai - {dto.SpecialtyName}"; rawCmd.Parameters.Add(p5);
+                        var p6 = rawCmd.CreateParameter(); p6.ParameterName = "@note"; p6.Value = $"Bệnh nhân vãng lai đăng ký tại quầy lễ tân | CCCD: {dto.CccdNumber}"; rawCmd.Parameters.Add(p6);
+
                         var rawId = await rawCmd.ExecuteScalarAsync();
                         if (rawId != null && rawId != DBNull.Value) newAppointmentId = Convert.ToInt32(rawId);
                     }
-                    catch { }
+                    catch (Exception exRaw)
+                    {
+                        Console.WriteLine("Raw SQL appointment insert exception: " + exRaw.Message);
+                    }
                 }
             }
 

@@ -188,6 +188,59 @@ public class FamilyMembersController : ControllerBase
         }
     }
 
+    // PATCH /api/familymembers/{id}/verify — Lễ Tân đối chiếu CCCD thực tế & duyệt hồ sơ người thân
+    // (người thân không có tài khoản đăng nhập riêng, nên thông báo được gửi tới chủ tài khoản - owner)
+    [HttpPatch("{id}/verify")]
+    public async Task<IActionResult> VerifyFamilyMember(int id, [FromBody] VerifyPatientDto dto)
+    {
+        try
+        {
+            var member = await _context.FamilyMembers.FirstOrDefaultAsync(m => m.MemberId == id);
+            if (member == null) return NotFound(new { success = false, message = "Không tìm thấy hồ sơ người thân." });
+
+            var receptionistUser = await _context.Users.FirstOrDefaultAsync(u => u.RoleId == 4 || u.Email == "letan.minhchau@gmail.com");
+            Guid currentUserId = receptionistUser?.UserId ?? Guid.Parse("ddb25ca6-80c8-434d-a05a-d4231c25e95b");
+
+            member.CccdNumber = dto.CccdNumber;
+            member.VerificationStatus = "verified";
+            member.VerifiedBy = currentUserId;
+            member.VerifiedAt = DateTime.UtcNow;
+            member.VerificationNote = $"Đã đối chiếu thẻ CCCD thực tế tại Quầy Lễ Tân. CCCD: {dto.CccdNumber}. Duyệt lúc: {DateTime.UtcNow:dd/MM/yyyy HH:mm}";
+            member.UpdatedAt = DateTime.UtcNow;
+
+            await _context.SaveChangesAsync();
+
+            var owner = await _context.Patients.FirstOrDefaultAsync(p => p.PatientId == member.OwnerPatientId);
+            if (owner != null && owner.UserId != Guid.Empty)
+            {
+                var cccdMasked = dto.CccdNumber.Length >= 4 ? "****" + dto.CccdNumber.Substring(dto.CccdNumber.Length - 4) : dto.CccdNumber;
+                _context.Notifications.Add(new Notification
+                {
+                    UserId = owner.UserId,
+                    Title = "✅ Hồ Sơ Người Thân Đã Được Xác Thực CCCD",
+                    Content = $"Hồ sơ người thân '{member.FullName}' ({member.Relationship}) trong tài khoản của bạn đã được Lễ Tân Bệnh viện DTT Healthcare đối chiếu thẻ CCCD thực tế (CCCD: {cccdMasked}) và chính thức được XÁC THỰC.",
+                    Type = "system",
+                    IsRead = false,
+                    CreatedAt = DateTime.UtcNow
+                });
+                await _context.SaveChangesAsync();
+            }
+
+            return Ok(new
+            {
+                success = true,
+                message = "Đã xác thực CCCD hồ sơ người thân thành công!",
+                memberId = id,
+                cccd = dto.CccdNumber,
+                verificationStatus = "verified"
+            });
+        }
+        catch (Exception ex)
+        {
+            return StatusCode(500, new { success = false, message = ex.Message });
+        }
+    }
+
     // DELETE /api/familymembers/{id}
     [HttpDelete("{id}")]
     public async Task<IActionResult> DeleteFamilyMember(string id)

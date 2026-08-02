@@ -2,6 +2,7 @@ using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using DTT_Backend_API.Data;
 using DTT_Backend_API.Models;
+using System.Linq;
 
 namespace DTT_Backend_API.Controllers;
 
@@ -16,30 +17,65 @@ public class PatientsController : ControllerBase
         _context = context;
     }
 
-    // GET /api/patients — List all patients for Reception desk
+    // GET /api/patients — List all patients + hồ sơ người thân (family_members) chờ xác thực CCCD tại quầy
+    // cho Lễ Tân. Trước đây chỉ trả về patients — hồ sơ người thân tự thêm qua App (đang "pending")
+    // không có cách nào hiện lên màn "Xác Thực Hồ Sơ" để Lễ Tân duyệt khi họ đến quầy đối chiếu CCCD.
     [HttpGet]
     public async Task<IActionResult> GetAllPatients()
     {
         try
         {
-            var patients = await _context.Patients
-                .OrderByDescending(p => p.CreatedAt)
-                .Select(p => new
+            // patients.phone_number có thể NULL với các hồ sơ cũ/tạo qua vài luồng khác nhau,
+            // trong khi users.phone_number (SĐT đăng nhập) LUÔN có giá trị thật — fallback sang
+            // đó để Lễ Tân luôn tìm được bệnh nhân theo SĐT, tránh báo "Không tìm thấy hồ sơ" sai.
+            var patients = await (
+                from p in _context.Patients
+                join u in _context.Users on p.UserId equals u.UserId into pu
+                from u in pu.DefaultIfEmpty()
+                select new ReceptionProfileDto
                 {
-                    id = p.PatientId,
-                    fullName = p.FullName,
-                    dob = p.DateOfBirth.HasValue ? p.DateOfBirth.Value.ToString("dd/MM/yyyy") : "",
-                    gender = p.Gender ?? "",
-                    phone = p.PhoneNumber ?? "",
-                    cccd = p.CccdNumber ?? "",
-                    bhyt = p.HealthInsuranceNumber ?? "",
-                    address = p.Address ?? "",
-                    verificationStatus = p.VerificationStatus ?? "pending",
-                    createdAt = p.CreatedAt
+                    Id = p.PatientId,
+                    RecordType = "patient",
+                    FullName = p.FullName,
+                    Relationship = "Bản thân",
+                    Dob = p.DateOfBirth.HasValue ? p.DateOfBirth.Value.ToString("dd/MM/yyyy") : "",
+                    Gender = p.Gender ?? "",
+                    Phone = !string.IsNullOrEmpty(p.PhoneNumber) ? p.PhoneNumber : (u != null ? u.PhoneNumber : ""),
+                    Cccd = p.CccdNumber ?? "",
+                    Bhyt = p.HealthInsuranceNumber ?? "",
+                    Address = p.Address ?? "",
+                    VerificationStatus = p.VerificationStatus ?? "pending",
+                    CreatedAt = p.CreatedAt
                 })
                 .ToListAsync();
 
-            return Ok(new { success = true, patients });
+            var familyMembers = await (
+                from m in _context.FamilyMembers
+                join owner in _context.Patients on m.OwnerPatientId equals owner.PatientId into om
+                from owner in om.DefaultIfEmpty()
+                join u in _context.Users on (owner != null ? owner.UserId : Guid.Empty) equals u.UserId into mu
+                from u in mu.DefaultIfEmpty()
+                select new ReceptionProfileDto
+                {
+                    Id = m.MemberId,
+                    RecordType = "family_member",
+                    FullName = m.FullName,
+                    Relationship = m.Relationship ?? "Người thân",
+                    Dob = m.DateOfBirth.HasValue ? m.DateOfBirth.Value.ToString("dd/MM/yyyy") : "",
+                    Gender = m.Gender ?? "",
+                    // Người thân thường không có SĐT riêng — hiện SĐT của chủ tài khoản để Lễ Tân liên hệ/tra cứu
+                    Phone = !string.IsNullOrEmpty(m.PhoneNumber) ? m.PhoneNumber : (u != null ? u.PhoneNumber : ""),
+                    Cccd = m.CccdNumber ?? "",
+                    Bhyt = m.HealthInsuranceNumber ?? "",
+                    Address = m.Address ?? "",
+                    VerificationStatus = m.VerificationStatus ?? "pending",
+                    CreatedAt = m.CreatedAt
+                })
+                .ToListAsync();
+
+            var combined = patients.Concat(familyMembers).OrderByDescending(x => x.CreatedAt).ToList();
+
+            return Ok(new { success = true, patients = combined });
         }
         catch (Exception ex)
         {
@@ -53,14 +89,17 @@ public class PatientsController : ControllerBase
     {
         try
         {
-            var patients = await _context.Patients
-                .Where(p => p.VerificationStatus == "pending" || p.CccdNumber == null || p.CccdNumber == "")
-                .OrderByDescending(p => p.CreatedAt)
-                .Select(p => new
+            var patients = await (
+                from p in _context.Patients
+                join u in _context.Users on p.UserId equals u.UserId into pu
+                from u in pu.DefaultIfEmpty()
+                where p.VerificationStatus == "pending" || p.CccdNumber == null || p.CccdNumber == ""
+                orderby p.CreatedAt descending
+                select new
                 {
                     id = p.PatientId,
                     fullName = p.FullName,
-                    phone = p.PhoneNumber ?? "",
+                    phone = !string.IsNullOrEmpty(p.PhoneNumber) ? p.PhoneNumber : (u != null ? u.PhoneNumber : ""),
                     cccd = p.CccdNumber ?? "",
                     bhyt = p.HealthInsuranceNumber ?? "",
                     verificationStatus = p.VerificationStatus ?? "pending"
@@ -260,4 +299,22 @@ public class LinkQrRequestDto
 public class VerifyPatientDto
 {
     public string CccdNumber { get; set; } = string.Empty;
+}
+
+// Dùng chung cho cả hồ sơ bệnh nhân chính (patients) và hồ sơ người thân (family_members)
+// trên màn "Xác Thực Hồ Sơ" của Lễ Tân — RecordType phân biệt để gọi đúng endpoint duyệt.
+public class ReceptionProfileDto
+{
+    public int Id { get; set; }
+    public string RecordType { get; set; } = "patient"; // "patient" | "family_member"
+    public string? FullName { get; set; }
+    public string Relationship { get; set; } = "Bản thân";
+    public string? Dob { get; set; }
+    public string? Gender { get; set; }
+    public string? Phone { get; set; }
+    public string? Cccd { get; set; }
+    public string? Bhyt { get; set; }
+    public string? Address { get; set; }
+    public string VerificationStatus { get; set; } = "pending";
+    public DateTime CreatedAt { get; set; }
 }

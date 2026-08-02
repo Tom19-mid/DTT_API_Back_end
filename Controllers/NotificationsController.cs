@@ -72,7 +72,7 @@ public class NotificationsController : ControllerBase
 
             var dtos = list.Select(n =>
             {
-                var (icon, color, bgColor) = GetIconAndColors(n.Type);
+                var (icon, color, bgColor) = GetIconAndColors(n.Type, n.Title);
                 return new NotificationDto
                 {
                     Id = n.NotificationId.ToString(),
@@ -151,12 +151,39 @@ public class NotificationsController : ControllerBase
         }
     }
 
-    private static (string Icon, string Color, string BgColor) GetIconAndColors(string? type)
+    private static (string Icon, string Color, string BgColor) GetIconAndColors(string? type, string? title)
     {
-        return (type?.ToLower()) switch
+        string tStr = (title ?? "").ToLower();
+        string typeStr = (type ?? "").ToLower();
+
+        if (tStr.Contains("bác sĩ") || tStr.Contains("gọi khám") || tStr.Contains("mời vào"))
+            return ("notifications", "#6366F1", "#EEF2FF"); // Indigo / Doctor Call icon
+
+        if (tStr.Contains("sinh hiệu") || tStr.Contains("huyết áp") || tStr.Contains("mạch"))
+            return ("fitness", "#8B5CF6", "#F5F3FF"); // Violet / Vitals icon
+
+        if (tStr.Contains("hoàn tất khám") || tStr.Contains("lưu bệnh án") || tStr.Contains("hoàn thành"))
+            return ("checkmark-done-circle", "#10B981", "#ECFDF5"); // Emerald / Completed icon
+
+        if (tStr.Contains("xét nghiệm"))
+            return ("flask", "#F59E0B", "#FFFBEB"); // Amber / Lab test icon
+
+        if (tStr.Contains("siêu âm"))
+            return ("scan", "#06B6D4", "#ECFEFF"); // Cyan / Ultrasound icon
+
+        if (tStr.Contains("đơn thuốc") || tStr.Contains("thuốc"))
+            return ("medkit", "#3B82F6", "#EFF6FF"); // Blue / Medicine icon
+
+        if (tStr.Contains("hóa đơn") || tStr.Contains("thanh toán"))
+            return ("receipt", "#10B981", "#ECFDF5"); // Emerald / Receipt icon
+
+        if (tStr.Contains("tài khoản") || tStr.Contains("chào mừng") || tStr.Contains("xác thực"))
+            return ("person-circle", "#3B82F6", "#EFF6FF"); // Blue / Account icon
+
+        return typeStr switch
         {
             "appointment" => ("calendar", "#3B82F6", "#EFF6FF"),
-            "result" => ("flask", "#10B981", "#ECFDF5"),
+            "result" => ("document-text", "#10B981", "#ECFDF5"),
             "promotion" => ("gift", "#F59E0B", "#FFFBEB"),
             _ => ("information-circle", "#6B7280", "#F3F4F6")
         };
@@ -164,14 +191,28 @@ public class NotificationsController : ControllerBase
 
     private static string GetRelativeTime(DateTime time)
     {
-        var span = DateTime.UtcNow - time.ToUniversalTime();
+        // Normalize to Vietnam Time (UTC+7). LƯU Ý: Npgsql luôn trả DateTime.Kind = Unspecified cho
+        // cột "timestamp without time zone" (KHÔNG BAO GIỜ là Utc dù giá trị lưu thật sự là UTC, vì
+        // toàn bộ CreatedAt trong hệ thống đều gán = DateTime.UtcNow) — điều kiện "time.Kind == Utc"
+        // trước đây luôn sai, khiến notiTime KHÔNG BAO GIỜ được cộng +7h trong khi localNow thì có,
+        // tạo ra lệch đúng 7 tiếng cho MỌI thông báo bất kể vừa tạo bao lâu.
+        DateTime localNow = DateTime.UtcNow.AddHours(7);
+        DateTime notiTime = time.AddHours(7);
+
+        var span = localNow - notiTime;
+
+        if (span.TotalMinutes < 1)
+            return "Vừa xong";
         if (span.TotalMinutes < 60)
-            return $"{Math.Max(1, (int)span.TotalMinutes)} phút trước";
-        if (span.TotalHours < 24)
+            return $"{(int)Math.Max(1, span.TotalMinutes)} phút trước";
+        if (span.TotalHours < 12 && notiTime.Date == localNow.Date)
             return $"{(int)span.TotalHours} giờ trước";
-        if (span.TotalDays < 7)
-            return $"{(int)span.TotalDays} ngày trước";
-        return time.ToString("dd/MM/yyyy");
+        if (notiTime.Date == localNow.Date)
+            return $"{notiTime:HH:mm} • Hôm nay";
+        if (notiTime.Date == localNow.Date.AddDays(-1))
+            return $"{notiTime:HH:mm} • Hôm qua";
+
+        return $"{notiTime:HH:mm} • {notiTime:dd/MM/yyyy}";
     }
 }
 

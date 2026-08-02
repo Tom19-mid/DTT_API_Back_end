@@ -26,9 +26,13 @@ public class AppointmentResponseDto
     public string Date { get; set; } = string.Empty;
     public string TimeSlot { get; set; } = string.Empty;
     public string Status { get; set; } = "Confirmed";
+    /// <summary>Trạng thái thanh toán THẬT lấy từ bảng invoices ("paid" | "pending" | "unpaid") — không suy ra từ appointment.status_id.</summary>
+    public string PaymentStatus { get; set; } = "unpaid";
     public int QueueNumber { get; set; }
     public string ClinicRoom { get; set; } = "Phòng 101";
     public string Fee { get; set; } = "250.000đ";
     public bool IsPackage { get; set; } = false;
     public DateTime CreatedAt { get; set; }
+    /// <summary>JSON sinh hiệu do Điều dưỡng đo (null nếu chưa đo)</summary>
+    public string? NurseNote { get; set; }
 }

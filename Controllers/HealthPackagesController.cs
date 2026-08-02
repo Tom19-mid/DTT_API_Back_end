@@ -123,7 +123,8 @@ public class HealthPackagesController : ControllerBase
                     new AppointmentStatus { StatusId = 4, StatusName = "Completed" },
                     new AppointmentStatus { StatusId = 5, StatusName = "Cancelled" },
                     new AppointmentStatus { StatusId = 6, StatusName = "NoShow" },
-                    new AppointmentStatus { StatusId = 7, StatusName = "CheckedIn" }
+                    new AppointmentStatus { StatusId = 7, StatusName = "CheckedIn" },
+                    new AppointmentStatus { StatusId = 8, StatusName = "WaitingForDoctor" }
                 );
                 try { await _context.SaveChangesAsync(); } catch { }
             }
@@ -191,7 +192,25 @@ public class HealthPackagesController : ControllerBase
             // 5. Create appointment record for package booking with EF Save & Raw SQL fallback
             int queueNum = (await _context.Appointments.CountAsync(a => a.PatientId == validPatientId)) + 1;
             int newAppointmentId = 0;
-            string bookingReason = $"{specName} - Gói: {pkg.Title} - {req.PreferredDate ?? DateTime.UtcNow.AddDays(1).ToString("dd/M/yyyy")}";
+
+            // Xác định ngày hẹn khám thực tế (mặc định ngày mai nếu không có PreferredDate) và LƯU vào
+            // cột appointment_date — trước đây chỉ nhúng vào chuỗi Reason (text tự do), khiến màn
+            // "Tiếp Đón & Check-in hôm nay" (lọc theo appointment_date) không nhận diện được, nên các
+            // ca đặt gói khám cho ngày mai vẫn bị hiện nhầm vào danh sách hôm nay (fallback theo created_at).
+            DateOnly apptDateForPackage;
+            if (!string.IsNullOrEmpty(req.PreferredDate) &&
+                DateOnly.TryParseExact(req.PreferredDate, new[] { "d/M/yyyy", "dd/MM/yyyy", "yyyy-MM-dd", "M/d/yyyy" },
+                    System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.None, out var parsedPkgDate))
+            {
+                apptDateForPackage = parsedPkgDate;
+            }
+            else
+            {
+                apptDateForPackage = DateOnly.FromDateTime(DateTime.UtcNow.AddHours(7).AddDays(1)); // mặc định: ngày mai (giờ VN)
+            }
+            string preferredDateStr = apptDateForPackage.ToString("dd/M/yyyy");
+
+            string bookingReason = $"{specName} - Gói: {pkg.Title} - {preferredDateStr}";
             try
             {
                 var appointment = new Appointment
@@ -203,6 +222,7 @@ public class HealthPackagesController : ControllerBase
                     Note = $"Gói khám: {pkg.Title} | {FormatPrice(pkg.Price)} | Bệnh nhân: {req.PatientName}",
                     StatusId = 1, // Confirmed
                     QueueNumber = queueNum,
+                    AppointmentDate = apptDateForPackage,
                     CreatedAt = DateTime.UtcNow
                 };
 
@@ -218,8 +238,8 @@ public class HealthPackagesController : ControllerBase
 
                 using var rawCmd = conn.CreateCommand();
                 rawCmd.CommandText = @"
-                    INSERT INTO appointments (patient_id, doctor_id, slot_id, reason, status_id, queue_number, note, created_at)
-                    VALUES (@pId, @dId, @sId, @reason, 1, @qNum, @note, NOW())
+                    INSERT INTO appointments (patient_id, doctor_id, slot_id, reason, status_id, queue_number, note, appointment_date, created_at)
+                    VALUES (@pId, @dId, @sId, @reason, 1, @qNum, @note, @apptDate, NOW())
                     RETURNING appointment_id";
                 var p1 = rawCmd.CreateParameter(); p1.ParameterName = "@pId"; p1.Value = validPatientId; rawCmd.Parameters.Add(p1);
                 var p2 = rawCmd.CreateParameter(); p2.ParameterName = "@dId"; p2.Value = validDoctorId; rawCmd.Parameters.Add(p2);
@@ -227,9 +247,29 @@ public class HealthPackagesController : ControllerBase
                 var p4 = rawCmd.CreateParameter(); p4.ParameterName = "@reason"; p4.Value = bookingReason; rawCmd.Parameters.Add(p4);
                 var p5 = rawCmd.CreateParameter(); p5.ParameterName = "@qNum"; p5.Value = queueNum; rawCmd.Parameters.Add(p5);
                 var p6 = rawCmd.CreateParameter(); p6.ParameterName = "@note"; p6.Value = $"Gói khám: {pkg.Title} | {FormatPrice(pkg.Price)} | Bệnh nhân: {req.PatientName}"; rawCmd.Parameters.Add(p6);
+                var p7 = rawCmd.CreateParameter(); p7.ParameterName = "@apptDate"; p7.Value = apptDateForPackage; rawCmd.Parameters.Add(p7);
 
                 var inserted = await rawCmd.ExecuteScalarAsync();
                 if (inserted != null && inserted != DBNull.Value) newAppointmentId = Convert.ToInt32(inserted);
+            }
+
+            // Gửi thông báo xác nhận đặt gói khám lên App Mobile — trước đây thiếu, bệnh nhân chỉ thấy
+            // xác nhận tức thời trên màn hình lúc đặt, không có lịch sử nếu thoát app trước khi xem kỹ.
+            var pkgPatient = await _context.Patients.FirstOrDefaultAsync(p => p.PatientId == validPatientId);
+            if (pkgPatient != null && pkgPatient.UserId != Guid.Empty)
+            {
+                _context.Notifications.Add(new Notification
+                {
+                    UserId = pkgPatient.UserId,
+                    Title = "✅ Đặt Gói Khám Sức Khỏe Thành Công",
+                    Content = $"Bạn đã đặt thành công gói khám '{pkg.Title}' (giá {FormatPrice(pkg.Price)}), dự kiến khám ngày {apptDateForPackage:dd/MM/yyyy}. Số thứ tự dự kiến: {queueNum}.\n\nVui lòng đến bệnh viện đúng ngày hẹn để làm thủ tục tiếp đón.",
+                    Type = "appointment",
+                    RelatedId = newAppointmentId > 0 ? newAppointmentId : (int?)null,
+                    RelatedType = "appointment",
+                    IsRead = false,
+                    CreatedAt = DateTime.UtcNow
+                });
+                try { await _context.SaveChangesAsync(); } catch { }
             }
 
             return Ok(new
@@ -239,7 +279,7 @@ public class HealthPackagesController : ControllerBase
                 appointmentId = newAppointmentId > 0 ? newAppointmentId : queueNum,
                 packageTitle = pkg.Title,
                 priceFormatted = FormatPrice(pkg.Price),
-                preferredDate = req.PreferredDate ?? DateTime.UtcNow.AddDays(1).ToString("dd/MM/yyyy"),
+                preferredDate = apptDateForPackage.ToString("dd/MM/yyyy"),
                 queueNumber = queueNum
             });
         }

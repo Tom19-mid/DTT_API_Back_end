@@ -35,6 +35,8 @@ public class MedicinesController : ControllerBase
                     CategoryId = m.CategoryId,
                     MedicineName = m.MedicineName,
                     Unit = m.Unit,
+                    UnitPrice = m.UnitPrice,
+                    StockQuantity = m.StockQuantity,
                     DefaultUsage = m.DefaultUsage ?? "Theo chỉ định bác sĩ"
                 })
                 .ToListAsync();

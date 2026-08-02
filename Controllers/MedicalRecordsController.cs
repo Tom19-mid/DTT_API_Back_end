@@ -2,6 +2,7 @@ using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using DTT_Backend_API.Data;
 using DTT_Backend_API.Models;
+using System.Linq;
 
 namespace DTT_Backend_API.Controllers;
 
@@ -14,6 +15,48 @@ public class MedicalRecordsController : ControllerBase
     public MedicalRecordsController(AppDbContext context)
     {
         _context = context;
+    }
+
+    // GET /api/medicalrecords/icd10?specialtyId=X&search=Y
+    // Trả về danh mục ICD-10 — nếu có specialtyId, mã thuộc đúng chuyên khoa của bác sĩ được xếp
+    // lên đầu danh sách (gợi ý thông minh), nhưng vẫn trả về đủ toàn bộ để bác sĩ tìm mã khác nếu cần.
+    [HttpGet("icd10")]
+    public async Task<IActionResult> GetIcd10Catalog([FromQuery] int? specialtyId, [FromQuery] string? search)
+    {
+        try
+        {
+            var query = _context.Icd10Catalogs.AsQueryable();
+
+            if (!string.IsNullOrWhiteSpace(search))
+            {
+                string s = search.Trim().ToLower();
+                query = query.Where(c => c.IcdCode.ToLower().Contains(s) || c.DiseaseName.ToLower().Contains(s));
+            }
+
+            var all = await query.ToListAsync();
+
+            var ordered = specialtyId.HasValue && specialtyId.Value > 0
+                ? all.OrderByDescending(c => c.SpecialtyId == specialtyId.Value)
+                     .ThenBy(c => c.DiseaseName)
+                     .ToList()
+                : all.OrderBy(c => c.DiseaseName).ToList();
+
+            var result = ordered.Select(c => new
+            {
+                icdCode = c.IcdCode,
+                diseaseName = c.DiseaseName,
+                chapterName = c.ChapterName,
+                isCommon = c.IsCommon,
+                specialtyId = c.SpecialtyId,
+                matchesSpecialty = specialtyId.HasValue && c.SpecialtyId == specialtyId.Value
+            });
+
+            return Ok(new { success = true, items = result });
+        }
+        catch (Exception ex)
+        {
+            return StatusCode(500, new { success = false, message = ex.Message });
+        }
     }
 
     // GET /api/medicalrecords/patient/{patientId}
@@ -88,13 +131,17 @@ public class MedicalRecordsController : ControllerBase
                 var tests = await _context.MedicalTests.Where(t => t.MedicalRecordId == r.MedicalRecordId).ToListAsync();
                 foreach (var t in tests)
                 {
+                    // Chưa có kết quả (KTV chưa thực hiện) — KHÔNG được ngầm định là "Bình thường",
+                    // dễ gây hiểu lầm cho bệnh nhân là đã có kết quả tốt trong khi thực ra chưa làm.
+                    string testResult = t.ResultStatus == "Pending" ? "Đang chờ kết quả" : (t.ResultValue ?? "Bình thường");
                     xetNghiem.Add(new
                     {
                         id = t.TestId,
                         date = r.ExaminationDate.ToString("dd/MM/yyyy"),
                         clinicKey = clinicKey,
                         type = t.TestName,
-                        result = t.ResultValue ?? "Bình thường",
+                        result = testResult,
+                        status = t.ResultStatus,
                         code = $"XN-{r.ExaminationDate:yyyyMMdd}-{t.TestId:D2}"
                     });
                 }
@@ -103,14 +150,17 @@ public class MedicalRecordsController : ControllerBase
                 var uls = await _context.UltrasoundResults.Where(u => u.MedicalRecordId == r.MedicalRecordId).ToListAsync();
                 foreach (var u in uls)
                 {
+                    string ulsResult = u.ResultStatus == "Pending" ? "Đang chờ kết quả" : (u.Conclusion ?? "Bình thường");
                     sieuAm.Add(new
                     {
                         id = u.UltrasoundId,
-                        date = u.PerformedAt.ToString("dd/MM/yyyy"),
+                        date = (u.PerformedAt ?? r.ExaminationDate).ToString("dd/MM/yyyy"),
                         clinicKey = clinicKey,
                         type = u.UltrasoundType ?? "Siêu âm tổng quát",
-                        result = u.Conclusion ?? "Bình thường",
-                        code = $"SA-{u.PerformedAt:yyyyMMdd}-{u.UltrasoundId:D2}"
+                        result = ulsResult,
+                        status = u.ResultStatus,
+                        imageUrls = u.ImageUrls ?? Array.Empty<string>(),
+                        code = $"SA-{(u.PerformedAt ?? r.ExaminationDate):yyyyMMdd}-{u.UltrasoundId:D2}"
                     });
                 }
             }
@@ -160,6 +210,15 @@ public class MedicalRecordsController : ControllerBase
                 int docId = appt?.DoctorId ?? 1;
                 string doctorName = doctorMap.ContainsKey(docId) ? doctorMap[docId] : "BS. Nguyễn Văn A";
 
+                // Trả về CHI TIẾT dòng hóa đơn thật (invoice_items) — trước đây chỉ có 1 dòng tóm tắt,
+                // khiến app Mobile phải TỰ ĐOÁN cách chia (luôn giả định 250k phí khám + phần còn lại
+                // là "thuốc"), sai hoàn toàn với gói khám hoặc ca có phí khác 250k.
+                var invoiceItems = await _context.InvoiceItems
+                    .Where(ii => ii.InvoiceId == inv.InvoiceId)
+                    .OrderBy(ii => ii.ItemId)
+                    .Select(ii => new { name = ii.ItemName, amount = ii.Amount })
+                    .ToListAsync();
+
                 hoaDon.Add(new
                 {
                     id = inv.InvoiceId,
@@ -167,6 +226,7 @@ public class MedicalRecordsController : ControllerBase
                     doctor = doctorName,
                     clinicKey = "general_internal",
                     items = $"Chi phí khám & Dịch vụ y tế (Tổng: {inv.TotalAmount:N0} VNĐ)",
+                    invoiceItems,
                     code = $"HD-{inv.InvoiceDate:yyyyMMdd}-{inv.InvoiceId:D2}",
                     totalAmount = inv.TotalAmount,
                     paymentStatus = inv.PaymentStatus
@@ -289,7 +349,7 @@ public class MedicalRecordsController : ControllerBase
                 DoctorId = docId,
                 SlotId = slotId,
                 Reason = "Khám tổng quát (Auto-seeded)",
-                StatusId = 2, // Status 2 = Completed
+                StatusId = 4, // Status 4 = Completed
                 IsActive = false, // Must be false for historical records to bypass idx_appointments_slot_active
                 QueueNumber = new Random().Next(1, 100),
                 CreatedAt = DateTime.UtcNow
@@ -392,22 +452,24 @@ public class MedicalRecordsController : ControllerBase
     {
         try
         {
-            // 1. Create MedicalRecord entity
-            var record = new MedicalRecord
-            {
-                AppointmentId = dto.AppointmentId,
-                PatientId = dto.PatientId,
-                DoctorId = dto.DoctorId > 0 ? dto.DoctorId : 1,
-                Symptoms = dto.Symptoms,
-                Diagnosis = dto.Diagnosis,
-                TreatmentPlan = dto.TreatmentPlan,
-                BloodPressure = dto.BloodPressure,
-                DoctorNote = $"Lưu lúc {DateTime.Now:HH:mm dd/MM/yyyy}",
-                ExaminationDate = DateTime.UtcNow,
-                Status = "Completed",
-                CreatedAt = DateTime.UtcNow,
-                UpdatedAt = DateTime.UtcNow
-            };
+            // 1. Tái sử dụng phiếu khám Draft đã tạo sẵn (vd: do đã chỉ định CLS qua
+            //    ClinicalOrdersController trước khi hoàn tất khám) thay vì tạo trùng bản ghi mới.
+            var record = await _context.MedicalRecords.FirstOrDefaultAsync(r => r.AppointmentId == dto.AppointmentId);
+            bool isNewRecord = record == null;
+            if (record == null) record = new MedicalRecord { AppointmentId = dto.AppointmentId, CreatedAt = DateTime.UtcNow };
+
+            record.PatientId = dto.PatientId;
+            record.DoctorId = dto.DoctorId > 0 ? dto.DoctorId : 1;
+            record.Symptoms = dto.Symptoms;
+            record.Diagnosis = dto.Diagnosis;
+            record.IcdCode = dto.IcdCode;
+            record.IcdDescription = dto.IcdDescription;
+            record.TreatmentPlan = dto.TreatmentPlan;
+            record.BloodPressure = dto.BloodPressure;
+            record.DoctorNote = $"Lưu lúc {DateTime.Now:HH:mm dd/MM/yyyy}";
+            record.ExaminationDate = DateTime.UtcNow;
+            record.Status = "Completed";
+            record.UpdatedAt = DateTime.UtcNow;
 
             if (decimal.TryParse(dto.Temperature, out decimal temp)) record.Temperature = temp;
             if (decimal.TryParse(dto.Weight, out decimal w)) record.Weight = w;
@@ -420,8 +482,12 @@ public class MedicalRecordsController : ControllerBase
                 record.Bmi = Math.Round(record.Weight.Value / (hM * hM), 1);
             }
 
-            _context.MedicalRecords.Add(record);
+            if (isNewRecord) _context.MedicalRecords.Add(record);
             await _context.SaveChangesAsync();
+
+            // Tự động trừ tồn kho thuốc khi bác sĩ kê đơn — nếu không đủ hàng, trừ về 0 và
+            // ghi nhận lại để báo cho bác sĩ biết (KHÔNG chặn lưu đơn, chỉ cảnh báo).
+            var insufficientStock = new List<string>();
 
             // 2. Create Prescription if drugs exist
             if (dto.Prescriptions != null && dto.Prescriptions.Count > 0)
@@ -458,6 +524,27 @@ public class MedicalRecordsController : ControllerBase
                     _context.PrescriptionDetails.Add(detail);
                 }
                 await _context.SaveChangesAsync();
+
+                // Trừ tồn kho thật theo đơn vừa kê
+                var medIdsForStock = dto.Prescriptions.Select(p => p.MedicineId > 0 ? p.MedicineId : 1).Distinct().ToList();
+                var medsForStock = await _context.Medicines.Where(m => medIdsForStock.Contains(m.MedicineId)).ToDictionaryAsync(m => m.MedicineId);
+                foreach (var drug in dto.Prescriptions)
+                {
+                    int mid = drug.MedicineId > 0 ? drug.MedicineId : 1;
+                    if (!medsForStock.TryGetValue(mid, out var med)) continue;
+
+                    if (med.StockQuantity < drug.Quantity)
+                    {
+                        insufficientStock.Add($"{med.MedicineName} (còn {med.StockQuantity} {med.Unit}, cần {drug.Quantity})");
+                        med.StockQuantity = 0;
+                    }
+                    else
+                    {
+                        med.StockQuantity -= drug.Quantity;
+                    }
+                    med.UpdatedAt = DateTime.UtcNow;
+                }
+                await _context.SaveChangesAsync();
             }
 
             // 3. Update appointment status to Completed (4)
@@ -487,8 +574,20 @@ public class MedicalRecordsController : ControllerBase
                         medFee += price * presc.Quantity;
                     }
                 }
+
+                // Phí Xét nghiệm/Siêu âm đã chỉ định cho phiếu khám này (medical_services.price qua service_id)
+                var clsServiceIds = new List<int>();
+                clsServiceIds.AddRange(await _context.MedicalTests.Where(t => t.MedicalRecordId == record.MedicalRecordId && t.ServiceId != null).Select(t => t.ServiceId!.Value).ToListAsync());
+                clsServiceIds.AddRange(await _context.UltrasoundResults.Where(u => u.MedicalRecordId == record.MedicalRecordId && u.ServiceId != null).Select(u => u.ServiceId!.Value).ToListAsync());
+                decimal clsFee = 0;
+                if (clsServiceIds.Count > 0)
+                {
+                    var clsServices = await _context.ClinicalServices.Where(s => clsServiceIds.Contains(s.ServiceId)).ToListAsync();
+                    clsFee = clsServices.Sum(s => s.UnitPrice);
+                }
+
                 decimal examFee = 250000; // Cong kham chuyen khoa chieu chuot 250.000d
-                decimal totalAmount = examFee + medFee;
+                decimal totalAmount = examFee + medFee + clsFee;
 
                 var pendingInvoice = new Invoice
                 {
@@ -530,12 +629,26 @@ public class MedicalRecordsController : ControllerBase
                         UpdatedAt = DateTime.UtcNow
                     });
                 }
+                if (clsFee > 0)
+                {
+                    _context.InvoiceItems.Add(new InvoiceItem
+                    {
+                        InvoiceId = pendingInvoice.InvoiceId,
+                        ItemName = "Phi Xet nghiem & Sieu am chi dinh",
+                        ItemType = "ClinicalService",
+                        Quantity = clsServiceIds.Count,
+                        UnitPrice = clsFee,
+                        Amount = clsFee,
+                        CreatedAt = DateTime.UtcNow,
+                        UpdatedAt = DateTime.UtcNow
+                    });
+                }
                 await _context.SaveChangesAsync();
             }
             // Neu da co invoice (vi du chay lai), khong cap nhat gi - giu nguyen trang thai
 
 
-            return Ok(new { success = true, medicalRecordId = record.MedicalRecordId });
+            return Ok(new { success = true, medicalRecordId = record.MedicalRecordId, insufficientStock });
 
         }
         catch (Exception ex)
@@ -557,6 +670,8 @@ public class CreateMedicalRecordDto
     public string Height { get; set; } = string.Empty;
     public string Symptoms { get; set; } = string.Empty;
     public string Diagnosis { get; set; } = string.Empty;
+    public string? IcdCode { get; set; }
+    public string? IcdDescription { get; set; }
     public string TreatmentPlan { get; set; } = string.Empty;
     public List<PrescribedDrugDto> Prescriptions { get; set; } = new();
 }

@@ -13,11 +13,13 @@ public class AppDbContext : DbContext
     public DbSet<FamilyMember> FamilyMembers => Set<FamilyMember>();
     public DbSet<Doctor> Doctors => Set<Doctor>();
     public DbSet<Specialty> Specialties => Set<Specialty>();
+    public DbSet<Icd10Catalog> Icd10Catalogs => Set<Icd10Catalog>();
     public DbSet<Appointment> Appointments => Set<Appointment>();
     public DbSet<AppointmentStatus> AppointmentStatuses => Set<AppointmentStatus>();
     public DbSet<MedicalRecord> MedicalRecords => Set<MedicalRecord>();
     public DbSet<MedicalTest> MedicalTests => Set<MedicalTest>();
     public DbSet<UltrasoundResult> UltrasoundResults => Set<UltrasoundResult>();
+    public DbSet<ClinicalService> ClinicalServices => Set<ClinicalService>();
     public DbSet<Invoice> Invoices => Set<Invoice>();
     public DbSet<InvoiceItem> InvoiceItems => Set<InvoiceItem>();
     public DbSet<Notification> Notifications => Set<Notification>();

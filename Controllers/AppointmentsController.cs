@@ -36,7 +36,8 @@ public class AppointmentsController : ControllerBase
                     new AppointmentStatus { StatusId = 4, StatusName = "Completed" },
                     new AppointmentStatus { StatusId = 5, StatusName = "Cancelled" },
                     new AppointmentStatus { StatusId = 6, StatusName = "NoShow" },
-                    new AppointmentStatus { StatusId = 7, StatusName = "CheckedIn" }
+                    new AppointmentStatus { StatusId = 7, StatusName = "CheckedIn" },
+                    new AppointmentStatus { StatusId = 8, StatusName = "WaitingForDoctor" }
                 );
                 await _context.SaveChangesAsync();
             }
@@ -134,6 +135,19 @@ public class AppointmentsController : ControllerBase
             }
             if (slotId <= 0) slotId = 1;
 
+            // Parse ngày hẹn từ dto.Date (format d/M/yyyy hoặc yyyy-MM-dd)
+            DateOnly? apptDate = null;
+            if (!string.IsNullOrEmpty(dto.Date))
+            {
+                if (DateOnly.TryParseExact(dto.Date, new[] { "d/M/yyyy", "dd/MM/yyyy", "yyyy-MM-dd", "M/d/yyyy" },
+                    System.Globalization.CultureInfo.InvariantCulture,
+                    System.Globalization.DateTimeStyles.None, out var parsedDate))
+                {
+                    apptDate = parsedDate;
+                }
+            }
+            apptDate ??= DateOnly.FromDateTime(DateTime.UtcNow.AddHours(7)); // fallback: hôm nay VN
+
             int queueNum = (await _context.Appointments.CountAsync(a => a.PatientId == validPatientId)) + 1;
             int newAppointmentId = 0;
 
@@ -149,6 +163,7 @@ public class AppointmentsController : ControllerBase
                     StatusId = 1,
                     QueueNumber = queueNum,
                     Note = $"{dto.DoctorName} | {dto.Fee ?? "250.000đ"}",
+                    AppointmentDate = apptDate,
                     CreatedAt = DateTime.UtcNow
                 };
 
@@ -167,8 +182,8 @@ public class AppointmentsController : ControllerBase
 
                     using var rawCmd = conn.CreateCommand();
                     rawCmd.CommandText = @"
-                        INSERT INTO appointments (patient_id, doctor_id, slot_id, reason, status_id, queue_number, note, created_at)
-                        VALUES (@pId, @dId, @sId, @reason, 1, @qNum, @note, NOW())
+                        INSERT INTO appointments (patient_id, doctor_id, slot_id, reason, status_id, queue_number, note, appointment_date, created_at)
+                        VALUES (@pId, @dId, @sId, @reason, 1, @qNum, @note, @apptDate, NOW())
                         RETURNING appointment_id";
 
                     var p1 = rawCmd.CreateParameter(); p1.ParameterName = "@pId"; p1.Value = validPatientId; rawCmd.Parameters.Add(p1);
@@ -177,6 +192,7 @@ public class AppointmentsController : ControllerBase
                     var p4 = rawCmd.CreateParameter(); p4.ParameterName = "@reason"; p4.Value = (object?)dto.Reason ?? $"{dto.SpecialtyName} - {dto.Date} {dto.TimeSlot}"; rawCmd.Parameters.Add(p4);
                     var p5 = rawCmd.CreateParameter(); p5.ParameterName = "@qNum"; p5.Value = queueNum; rawCmd.Parameters.Add(p5);
                     var p6 = rawCmd.CreateParameter(); p6.ParameterName = "@note"; p6.Value = $"{dto.DoctorName} | {dto.Fee ?? "250.000đ"}"; rawCmd.Parameters.Add(p6);
+                    var p7 = rawCmd.CreateParameter(); p7.ParameterName = "@apptDate"; p7.Value = (object?)apptDate ?? DBNull.Value; rawCmd.Parameters.Add(p7);
 
                     var insertedId = await rawCmd.ExecuteScalarAsync();
                     if (insertedId != null && insertedId != DBNull.Value)
@@ -263,21 +279,32 @@ public class AppointmentsController : ControllerBase
 
             if (doctorId.HasValue && doctorId.Value > 0)
             {
-                // Bác sĩ nhìn thấy các bệnh nhân đã Check-in (7), Đang khám (3), Đã hoàn thành (4), Hủy (5)
-                query = query.Where(a => a.DoctorId == doctorId.Value && a.StatusId != 1);
+                // Bác sĩ chỉ thấy bệnh nhân đã qua Điều dưỡng đo sinh hiệu (status>=8) trở đi
+                // Workflow: CheckedIn(7)→[Điều dưỡng]→WaitingForDoctor(8)→[Bác sĩ]
+                query = query.Where(a => a.DoctorId == doctorId.Value &&
+                    (a.StatusId == 8 || a.StatusId == 3 || a.StatusId == 4 || a.StatusId == 5 || a.StatusId == 6));
             }
 
             if (todayOnly == true || date == "today")
             {
-                // Lọc các ca khám được tạo hoặc cập nhật trong ngày hôm nay (tính theo UTC/UTC+7)
-                var todayUtc = DateTime.UtcNow.Date.AddDays(-1);
-                query = query.Where(a => a.CreatedAt >= todayUtc || a.UpdatedAt >= todayUtc);
+                // Ưu tiên lọc theo cột appointment_date (chính xác ngày hẹn thực tế)
+                // Nếu appointment_date == null (record cũ) → fallback dùng CreatedAt trong ngày hôm nay
+                var nowVn        = DateTime.UtcNow.AddHours(7);
+                var todayVn      = DateOnly.FromDateTime(nowVn);           // hôm nay theo giờ VN
+                var todayVnStart = nowVn.Date.AddHours(-7);               // 00:00 VN → UTC
+                var todayVnEnd   = todayVnStart.AddDays(1);
+                query = query.Where(a =>
+                    (a.AppointmentDate != null && a.AppointmentDate == todayVn) ||
+                    (a.AppointmentDate == null  && a.CreatedAt >= todayVnStart && a.CreatedAt < todayVnEnd));
             }
             else if (!string.IsNullOrEmpty(date) && DateTime.TryParse(date, out DateTime filterDate))
             {
-                var startDate = filterDate.Date.AddDays(-1);
-                var endDate = filterDate.Date.AddDays(2);
-                query = query.Where(a => a.CreatedAt >= startDate && a.CreatedAt < endDate);
+                var filterDateOnly = DateOnly.FromDateTime(filterDate);
+                var startUtc = filterDate.Date.AddHours(-7);
+                var endUtc   = startUtc.AddDays(1);
+                query = query.Where(a =>
+                    (a.AppointmentDate != null && a.AppointmentDate == filterDateOnly) ||
+                    (a.AppointmentDate == null  && a.CreatedAt >= startUtc && a.CreatedAt < endUtc));
             }
 
             var list = await query
@@ -362,7 +389,7 @@ public class AppointmentsController : ControllerBase
         var patientIds = list.Select(a => a.PatientId).Distinct().ToList();
         var patients = await _context.Patients.Where(p => patientIds.Contains(p.PatientId)).ToDictionaryAsync(p => p.PatientId);
 
-        var specialtyIds = doctors.Values.Where(d => d.SpecialtyId.HasValue).Select(d => d.SpecialtyId.Value).Distinct().ToList();
+        var specialtyIds = doctors.Values.Where(d => d.SpecialtyId.HasValue).Select(d => d.SpecialtyId!.Value).Distinct().ToList();
         var specialties = await _context.Specialties.Where(s => specialtyIds.Contains(s.SpecialtyId)).ToDictionaryAsync(s => s.SpecialtyId);
 
         var apptIds = list.Select(a => a.AppointmentId).ToList();
@@ -377,11 +404,11 @@ public class AppointmentsController : ControllerBase
 
             string patientName = patient?.FullName ?? $"Bệnh nhân #{appt.PatientId}";
             string patientGender = !string.IsNullOrEmpty(patient?.Gender) ? patient.Gender : "Nam";
-            int patientAge = 35;
+            int patientAge = 0;
             if (patient?.DateOfBirth.HasValue == true)
             {
                 patientAge = (int)((DateTime.UtcNow - patient.DateOfBirth.Value).TotalDays / 365.25);
-                if (patientAge <= 0) patientAge = 35;
+                if (patientAge <= 0) patientAge = 0;
             }
 
             string specName = specialty?.SpecialtyName ?? (appt.Reason?.Contains("-") == true ? appt.Reason.Split('-')[0].Trim() : "Khám tổng quát");
@@ -421,13 +448,18 @@ public class AppointmentsController : ControllerBase
                 docName = ""; // Hide doctor for health packages
             }
 
-            string dateStr = appt.CreatedAt.ToString("dd/MM/yyyy");
+            string dateStr = appt.AppointmentDate.HasValue
+                ? appt.AppointmentDate.Value.ToString("dd/MM/yyyy")
+                : appt.CreatedAt.AddHours(7).ToString("dd/MM/yyyy");
             string timeStr = "08:30 - 09:30";
 
             if (!string.IsNullOrEmpty(appt.Reason))
             {
-                var dateMatch = System.Text.RegularExpressions.Regex.Match(appt.Reason, @"(\d{1,2}/\d{1,2}/\d{4})");
-                if (dateMatch.Success) dateStr = dateMatch.Value;
+                if (!appt.AppointmentDate.HasValue)
+                {
+                    var dateMatch = System.Text.RegularExpressions.Regex.Match(appt.Reason, @"(\d{1,2}/\d{1,2}/\d{4})");
+                    if (dateMatch.Success) dateStr = dateMatch.Value;
+                }
 
                 var rangeMatch = System.Text.RegularExpressions.Regex.Match(appt.Reason, @"(\d{1,2}:\d{2}\s*-\s*\d{1,2}:\d{2})");
                 if (rangeMatch.Success)
@@ -462,8 +494,10 @@ public class AppointmentsController : ControllerBase
             if (appt.StatusId == 6) statusStr = "NoShow";
             else if (appt.StatusId == 5) statusStr = "Cancelled";
             else if (appt.StatusId == 4) statusStr = "Completed";
+            else if (appt.StatusId == 9) statusStr = "AwaitingTestResults"; // BS đã chỉ định CLS → đang ở phòng XN/SA
             else if (appt.StatusId == 3) statusStr = "InProgress";
-            else if (appt.StatusId == 7) statusStr = "CheckedIn"; // Lễ Tân đã Check-in → chờ bác sĩ khám
+            else if (appt.StatusId == 8) statusStr = "WaitingForDoctor"; // Điều dưỡng đã đo sinh hiệu → chờ BS khám
+            else if (appt.StatusId == 7) statusStr = "CheckedIn"; // Lễ Tân đã Check-in → chờ điều dưỡng
             else if (appt.StatusId == 2 || appt.StatusId == 1) statusStr = "Confirmed"; // Chờ bệnh nhân đến Lễ Tân
 
             if ((appt.StatusId == 1 || appt.StatusId == 2 || appt.StatusId == 3) && !string.IsNullOrEmpty(dateStr))
@@ -491,11 +525,13 @@ public class AppointmentsController : ControllerBase
                 Date = dateStr,
                 TimeSlot = timeStr,
                 Status = statusStr,
+                PaymentStatus = invoiceMap.TryGetValue(appt.AppointmentId, out var apptInvoice) ? apptInvoice.PaymentStatus : "unpaid",
                 QueueNumber = appt.QueueNumber,
                 ClinicRoom = isPkg ? "" : (doctor?.ClinicRoom ?? "Phòng 101"),
                 Fee = feeStr,
                 IsPackage = isPkg,
-                CreatedAt = appt.CreatedAt
+                CreatedAt = appt.CreatedAt,
+                NurseNote = appt.NurseNote   // Truyền bộ sinh hiệu cho WinForms BS & Điều dưỡng
             });
         }
         return result;
@@ -519,6 +555,32 @@ public class AppointmentsController : ControllerBase
                     ? $"{req.CancelReason} | {cancellerInfo}"
                     : cancellerInfo;
                 // Do NOT write to CancelledBy — it's uuid type in PostgreSQL
+
+                // App Mobile luôn gửi cancelledBy="patient" khi bệnh nhân tự hủy (xem apiService.ts) —
+                // chỉ gửi thông báo khi KHÔNG PHẢI bệnh nhân tự hủy (vd: Lễ Tân hủy tại quầy), vì bệnh
+                // nhân tự hủy thì không cần báo lại chính họ. Trước đây endpoint này hoàn toàn không gửi
+                // thông báo trong mọi trường hợp — bệnh nhân không biết lịch của mình vừa bị hủy bởi nhân viên.
+                bool isStaffCancelled = !string.IsNullOrEmpty(req?.CancelledBy) &&
+                    !req.CancelledBy.Equals("patient", StringComparison.OrdinalIgnoreCase);
+                if (isStaffCancelled)
+                {
+                    var patient = await _context.Patients.FirstOrDefaultAsync(p => p.PatientId == appt.PatientId);
+                    if (patient != null && patient.UserId != Guid.Empty)
+                    {
+                        _context.Notifications.Add(new Notification
+                        {
+                            UserId = patient.UserId,
+                            Title = "⚠️ Lịch Khám Của Bạn Đã Bị Hủy",
+                            Content = $"Lịch hẹn khám ngày hôm nay của bạn đã được Lễ Tân Bệnh viện DTT Healthcare hủy." +
+                                      (!string.IsNullOrEmpty(req?.CancelReason) ? $"\n\nLý do: {req.CancelReason}" : "") +
+                                      "\n\nVui lòng liên hệ Bệnh viện hoặc đặt lại lịch mới trên ứng dụng nếu cần.",
+                            Type = "appointment",
+                            IsRead = false,
+                            CreatedAt = DateTime.UtcNow
+                        });
+                    }
+                }
+
                 await _context.SaveChangesAsync();
                 return Ok(new { success = true, message = "Đã hủy lịch khám thành công." });
             }
@@ -600,6 +662,18 @@ public class AppointmentsController : ControllerBase
                 else if (status == "NoShow" || status == "6")
                 {
                     appt.StatusId = 6; // 6 = NoShow
+                    if (targetUserId != Guid.Empty)
+                    {
+                        _context.Notifications.Add(new Notification
+                        {
+                            UserId = targetUserId,
+                            Title = "⏰ Ghi Nhận Bỏ Khám",
+                            Content = "Hệ thống ghi nhận bạn đã không đến khám theo lịch hẹn hôm nay. Nếu vẫn còn nhu cầu khám, vui lòng đặt lại lịch mới trên ứng dụng.",
+                            Type = "appointment",
+                            IsRead = false,
+                            CreatedAt = DateTime.UtcNow
+                        });
+                    }
                 }
                 else
                 {
@@ -631,6 +705,88 @@ public class AppointmentsController : ControllerBase
         }
         return rawTime;
     }
+
+    // ── Điều Dưỡng: Lưu sinh hiệu & chuyển trạng thái sang WaitingForDoctor ──────
+    // PUT /api/appointments/{id}/nurse-vitals
+    [HttpPut("{id}/nurse-vitals")]
+    public async Task<IActionResult> SaveNurseVitals(int id, [FromBody] NurseVitalsRequest req)
+    {
+        try
+        {
+            var appt = await _context.Appointments.FirstOrDefaultAsync(a => a.AppointmentId == id);
+            if (appt == null)
+                return NotFound(new { success = false, message = "Không tìm thấy lịch hẹn." });
+
+            // Chỉ cho phép đo sinh hiệu khi bệnh nhân đã CheckedIn (status=7)
+            if (appt.StatusId != 7)
+                return BadRequest(new { success = false, message = $"Bệnh nhân chưa Check-in (trạng thái hiện tại: {appt.StatusId}). Điều dưỡng chỉ đo được khi status = CheckedIn (7)." });
+
+            // Tự tính BMI nếu có chiều cao và cân nặng
+            double? bmi = null;
+            if (req.Height > 0 && req.Weight > 0)
+            {
+                double heightM = req.Height.Value / 100.0;
+                bmi = Math.Round(req.Weight.Value / (heightM * heightM), 1);
+            }
+
+            // Đảm bảo status_id=8 'WaitingForDoctor' tồn tại
+            bool hasStatus8 = await _context.AppointmentStatuses.AnyAsync(s => s.StatusId == 8);
+            if (!hasStatus8)
+            {
+                _context.AppointmentStatuses.Add(new AppointmentStatus { StatusId = 8, StatusName = "WaitingForDoctor" });
+                await _context.SaveChangesAsync();
+            }
+
+            // Lưu bộ sinh hiệu dưới dạng JSON vào cột nurse_note
+            var nursePayload = new
+            {
+                bloodPressure  = req.BloodPressure ?? "",
+                heartRate      = req.HeartRate ?? 0,
+                temperature    = req.Temperature ?? 0,
+                weight         = req.Weight ?? 0,
+                height         = req.Height ?? 0,
+                bmi            = bmi ?? 0,
+                nurseNote      = req.NurseNote ?? "",
+                measuredAt     = DateTime.UtcNow.ToString("o")
+            };
+            appt.NurseNote = System.Text.Json.JsonSerializer.Serialize(nursePayload);
+
+            // Chuyển trạng thái → WaitingForDoctor (8)
+            appt.StatusId  = 8;
+            appt.UpdatedAt = DateTime.UtcNow;
+
+            // Thông báo cho bệnh nhân đã đo xong sinh hiệu, đang chờ bác sĩ gọi vào khám — trước đây thiếu.
+            var vitalsPatient = await _context.Patients.FirstOrDefaultAsync(p => p.PatientId == appt.PatientId);
+            if (vitalsPatient != null && vitalsPatient.UserId != Guid.Empty)
+            {
+                _context.Notifications.Add(new Notification
+                {
+                    UserId = vitalsPatient.UserId,
+                    Title = "🩺 Đã Đo Sinh Hiệu Xong",
+                    Content = "Điều dưỡng đã đo xong chỉ số sinh hiệu của bạn. Vui lòng tiếp tục ngồi chờ tại khu vực phòng khám, Bác sĩ sẽ gọi bạn vào khám trong ít phút nữa.",
+                    Type = "appointment",
+                    IsRead = false,
+                    CreatedAt = DateTime.UtcNow
+                });
+            }
+
+            await _context.SaveChangesAsync();
+
+            return Ok(new
+            {
+                success  = true,
+                message  = $"Đã lưu sinh hiệu và chuyển bệnh nhân sang trạng thái 'Chờ Bác sĩ khám'.",
+                bmi      = bmi,
+                statusId = 8,
+                statusName = "WaitingForDoctor"
+            });
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine("Error saving nurse vitals: " + ex.Message);
+            return StatusCode(500, new { success = false, message = ex.Message });
+        }
+    }
 }
 
 public class CancelAppointmentRequest
@@ -642,4 +798,20 @@ public class CancelAppointmentRequest
 public class UpdateStatusRequest
 {
     public string? Status { get; set; }
+}
+
+public class NurseVitalsRequest
+{
+    /// <summary>Huyết áp, ví dụ "120/80"</summary>
+    public string? BloodPressure { get; set; }
+    /// <summary>Nhịp tim (bpm)</summary>
+    public int?    HeartRate     { get; set; }
+    /// <summary>Thân nhiệt (°C)</summary>
+    public double? Temperature   { get; set; }
+    /// <summary>Cân nặng (kg)</summary>
+    public double? Weight        { get; set; }
+    /// <summary>Chiều cao (cm)</summary>
+    public double? Height        { get; set; }
+    /// <summary>Ghi chú điều dưỡng tự do</summary>
+    public string? NurseNote     { get; set; }
 }

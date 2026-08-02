@@ -45,7 +45,7 @@ public class User
     public string PasswordHash { get; set; } = string.Empty;
 
     [Column("role_id")]
-    public int RoleId { get; set; } = 1; // 1 = Patient
+    public int RoleId { get; set; } = 3; // 3 = Patient (1 = Admin, 2 = Doctor trong bảng roles thật)
 
     [Column("status")]
     [StringLength(20)]
@@ -78,9 +78,25 @@ public class Patient
     [Column("date_of_birth")]
     public DateTime? DateOfBirth { get; set; }
 
+    // DB có CHECK constraint patients_gender_check: chỉ nhận 'Male'/'Female'/'Other'.
+    // App Mobile & WinForms gửi "Nam"/"Nữ"/"Khác" → chuẩn hoá tại đây để tránh lỗi vi phạm constraint khi lưu.
+    private string? _gender;
     [Column("gender")]
     [StringLength(20)]
-    public string? Gender { get; set; }
+    public string? Gender
+    {
+        get => _gender;
+        set => _gender = NormalizeGender(value);
+    }
+
+    private static string? NormalizeGender(string? raw)
+    {
+        if (string.IsNullOrWhiteSpace(raw)) return null;
+        var v = raw.Trim().ToLowerInvariant();
+        if (v == "nam" || v == "male" || v == "m") return "Male";
+        if (v == "nữ" || v == "nu" || v == "female" || v == "f") return "Female";
+        return "Other";
+    }
 
     [Column("address")]
     public string? Address { get; set; }
@@ -109,6 +125,9 @@ public class Patient
 
     [Column("verification_note")]
     public string? VerificationNote { get; set; }
+
+    [Column("avarta_url")]
+    public string? AvatarUrl { get; set; }
 
     [Column("created_at")]
     public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
@@ -198,6 +217,27 @@ public class Specialty
     public bool Status { get; set; } = true;
 }
 
+[Table("icd10_catalog")]
+public class Icd10Catalog
+{
+    [Key]
+    [Column("icd_code")]
+    [StringLength(20)]
+    public string IcdCode { get; set; } = string.Empty;
+
+    [Column("disease_name")]
+    public string DiseaseName { get; set; } = string.Empty;
+
+    [Column("chapter_name")]
+    public string? ChapterName { get; set; }
+
+    [Column("is_common")]
+    public bool IsCommon { get; set; }
+
+    [Column("specialty_id")]
+    public int? SpecialtyId { get; set; }
+}
+
 [Table("doctors")]
 public class Doctor
 {
@@ -285,6 +325,20 @@ public class Appointment
 
     [Column("is_active")]
     public bool IsActive { get; set; } = true;
+
+    /// <summary>
+    /// Bộ sinh hiệu do Điều dưỡng đo trước khi Bác sĩ khám.
+    /// JSON: { bloodPressure, heartRate, temperature, weight, height, bmi, nurseNote, measuredAt }
+    /// </summary>
+    [Column("nurse_note", TypeName = "jsonb")]
+    public string? NurseNote { get; set; }
+
+    /// <summary>
+    /// Ngày hẹn khám thực tế (dd/MM/yyyy). Dùng để lọc danh sách hôm nay chính xác.
+    /// Được gán khi đặt lịch (app mobile) hoặc khi lễ tân tạo vãng lai.
+    /// </summary>
+    [Column("appointment_date", TypeName = "date")]
+    public DateOnly? AppointmentDate { get; set; }
 
     [Column("created_at")]
     public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
@@ -398,9 +452,11 @@ public class MedicalTest
     [Column("result_value")]
     public string? ResultValue { get; set; }
 
+    // Valid values: 'Pending' (đã chỉ định, KTV chưa làm) | 'Normal' | 'Abnormal' (đã có kết quả).
+    // Khớp với chk_test_result_status trên DB — KHÔNG dùng chữ thường 'pending'.
     [Column("result_status")]
     [StringLength(20)]
-    public string ResultStatus { get; set; } = "pending";
+    public string ResultStatus { get; set; } = "Pending";
 
     [Column("unit")]
     [StringLength(50)]
@@ -410,11 +466,32 @@ public class MedicalTest
     [StringLength(100)]
     public string? ReferenceRange { get; set; }
 
+    // Null = chưa thực hiện (mới được Bác sĩ chỉ định). Được KTV gán = now() khi nộp kết quả.
     [Column("performed_at")]
-    public DateTime PerformedAt { get; set; } = DateTime.UtcNow;
+    public DateTime? PerformedAt { get; set; }
 
     [Column("result_file_url")]
     public string? ResultFileUrl { get; set; }
+
+    [Column("ordered_by")]
+    public Guid? OrderedBy { get; set; }
+
+    [Column("ordered_at")]
+    public DateTime OrderedAt { get; set; } = DateTime.UtcNow;
+
+    [Column("performed_by")]
+    public Guid? PerformedBy { get; set; }
+
+    [Column("service_id")]
+    public int? ServiceId { get; set; }
+
+    // Bác sĩ đánh dấu ca cần làm gấp (cito) — hàng đợi KTV ưu tiên các ca này lên đầu.
+    [Column("is_urgent")]
+    public bool IsUrgent { get; set; } = false;
+
+    // Lý do chỉ định lâm sàng bác sĩ ghi kèm (vd "Nghi viêm gan B") để KTV hiểu ngữ cảnh khi thực hiện.
+    [Column("clinical_note")]
+    public string? ClinicalNote { get; set; }
 
     [Column("created_at")]
     public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
@@ -446,8 +523,74 @@ public class UltrasoundResult
     [Column("image_urls", TypeName = "text[]")]
     public string[]? ImageUrls { get; set; }
 
+    // Null = chưa thực hiện. 'Pending' | 'Completed' | 'Cancelled'.
+    // Cột result_status đã có sẵn từ thiết kế DB gốc (đối xứng với medical_tests.result_status).
+    [Column("result_status")]
+    [StringLength(20)]
+    public string ResultStatus { get; set; } = "Pending";
+
     [Column("performed_at")]
-    public DateTime PerformedAt { get; set; } = DateTime.UtcNow;
+    public DateTime? PerformedAt { get; set; }
+
+    [Column("ordered_by")]
+    public Guid? OrderedBy { get; set; }
+
+    [Column("ordered_at")]
+    public DateTime OrderedAt { get; set; } = DateTime.UtcNow;
+
+    [Column("performed_by")]
+    public Guid? PerformedBy { get; set; }
+
+    [Column("service_id")]
+    public int? ServiceId { get; set; }
+
+    [Column("is_urgent")]
+    public bool IsUrgent { get; set; } = false;
+
+    [Column("clinical_note")]
+    public string? ClinicalNote { get; set; }
+
+    [Column("created_at")]
+    public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
+
+    [Column("updated_at")]
+    public DateTime UpdatedAt { get; set; } = DateTime.UtcNow;
+}
+
+// Từ điển dịch vụ Cận Lâm Sàng — bảng THẬT đã có sẵn trong thiết kế DB gốc
+// (xem Tai Lieu/winform_development_roadmap.md, mục 2). KHÔNG phải "medical_services".
+[Table("clinical_services")]
+public class ClinicalService
+{
+    [Key]
+    [Column("service_id")]
+    public int ServiceId { get; set; }
+
+    [Column("service_code")]
+    [StringLength(50)]
+    public string ServiceCode { get; set; } = string.Empty;
+
+    [Column("service_name")]
+    [StringLength(255)]
+    public string ServiceName { get; set; } = string.Empty;
+
+    // 'Laboratory' (Xét nghiệm) | 'Imaging' (Siêu âm/X-quang/CT) | 'Functional' (Thăm dò chức năng, vd ECG)
+    [Column("service_type")]
+    [StringLength(50)]
+    public string ServiceType { get; set; } = string.Empty;
+
+    [Column("department")]
+    [StringLength(100)]
+    public string? Department { get; set; }
+
+    [Column("unit_price")]
+    public decimal UnitPrice { get; set; }
+
+    [Column("description")]
+    public string? Description { get; set; }
+
+    [Column("is_active")]
+    public bool IsActive { get; set; } = true;
 
     [Column("created_at")]
     public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
@@ -682,8 +825,15 @@ public class Medicine
     [StringLength(50)]
     public string Unit { get; set; } = string.Empty;
 
-    [Column("price")]
-    public decimal Price { get; set; } = 15000m;
+    [Column("unit_price")]
+    public decimal UnitPrice { get; set; } = 15000m;
+
+    [NotMapped]
+    public decimal Price
+    {
+        get => UnitPrice;
+        set => UnitPrice = value;
+    }
 
     [Column("description")]
     public string? Description { get; set; }
@@ -694,6 +844,12 @@ public class Medicine
     [Column("status")]
     [StringLength(20)]
     public string Status { get; set; } = "Active";
+
+    [Column("stock_quantity")]
+    public int StockQuantity { get; set; } = 0;
+
+    [Column("expiry_date")]
+    public DateOnly? ExpiryDate { get; set; }
 
     [Column("created_at")]
     public DateTime CreatedAt { get; set; } = DateTime.UtcNow;

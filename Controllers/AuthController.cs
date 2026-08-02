@@ -109,9 +109,13 @@ public class AuthController : ControllerBase
             return Unauthorized(new { message = "Tài khoản Bệnh nhân chỉ dành cho App Mobile." });
         }
 
-        if (doctor == null)
+        // Chỉ tự tạo hồ sơ bác sĩ "BS. Điều trị" khi user thực sự có RoleId=2 (Doctor).
+        // Trước đây điều kiện này chạy cho MỌI role (Lễ tân, Điều dưỡng, KTV, Dược sĩ...) mỗi khi
+        // họ đăng nhập vào app WinForms mà chưa có hồ sơ Doctor — tạo ra các bác sĩ giả (specialty_id=1,
+        // Active) lẫn vào danh sách bác sĩ thật, khiến các luồng tự chọn bác sĩ theo chuyên khoa
+        // (vd: đặt gói khám) có thể chọn trúng bác sĩ giả không có lịch làm việc → lỗi khi đặt lịch.
+        if (doctor == null && user.RoleId == 2)
         {
-            // Auto-create basic doctor profile if RoleId == 2 but no Doctor entry found
             doctor = new Doctor
             {
                 UserId = user.UserId,
@@ -126,7 +130,7 @@ public class AuthController : ControllerBase
             await _context.SaveChangesAsync();
         }
 
-        var specialty = doctor.SpecialtyId.HasValue ? await _context.Specialties.FirstOrDefaultAsync(s => s.SpecialtyId == doctor.SpecialtyId.Value) : null;
+        var specialty = doctor?.SpecialtyId != null ? await _context.Specialties.FirstOrDefaultAsync(s => s.SpecialtyId == doctor.SpecialtyId.Value) : null;
 
         var role = await _context.Roles.FirstOrDefaultAsync(r => r.RoleId == user.RoleId);
         string roleCode = role?.RoleCode ?? (user.RoleId == 1 ? "ADMIN" : user.RoleId == 3 ? "PATIENT" : user.RoleId == 4 ? "RECEPTIONIST" : user.RoleId == 5 ? "NURSE" : user.RoleId == 6 ? "LAB_TECH" : user.RoleId == 7 ? "PHARMACIST" : "DOCTOR");
@@ -161,14 +165,14 @@ public class AuthController : ControllerBase
             return BadRequest(new { message = "Số điện thoại hoặc Email đã được sử dụng." });
         }
 
-        // 1. Ensure Roles table has entries
+        // 1. Ensure Roles table has entries (khớp với bảng roles thật: 1=Admin, 2=Doctor, 3=Patient)
         var roleCount = await _context.Roles.CountAsync();
         if (roleCount == 0)
         {
             _context.Roles.AddRange(
-                new Role { RoleId = 1, RoleName = "Patient", Description = "Bệnh nhân" },
+                new Role { RoleId = 1, RoleName = "Admin", Description = "Quản trị viên" },
                 new Role { RoleId = 2, RoleName = "Doctor", Description = "Bác sĩ" },
-                new Role { RoleId = 3, RoleName = "Admin", Description = "Quản trị viên" }
+                new Role { RoleId = 3, RoleName = "Patient", Description = "Bệnh nhân" }
             );
             await _context.SaveChangesAsync();
         }
@@ -182,7 +186,7 @@ public class AuthController : ControllerBase
             PhoneNumber = dto.Phone,
             Email = dto.Email,
             PasswordHash = hashedPassword,
-            RoleId = 1, // Role 1 = Patient
+            RoleId = 3, // Role 3 = Patient (theo bảng roles thật: 1=Admin, 2=Doctor, 3=Patient)
             Status = "Active" // Must be Active to pass users_status_check constraint
         };
 

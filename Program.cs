@@ -76,6 +76,10 @@ using (var scope = app.Services.CreateScope())
 
 app.UseCors("AllowAll");
 
+// Phục vụ ảnh siêu âm KTV đính kèm (wwwroot/uploads/...) qua URL tĩnh /uploads/...
+Directory.CreateDirectory(Path.Combine(app.Environment.ContentRootPath, "wwwroot", "uploads"));
+app.UseStaticFiles();
+
 app.MapOpenApi();
 
 app.UseAuthentication();
