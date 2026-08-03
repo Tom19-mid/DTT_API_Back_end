@@ -1,8 +1,10 @@
 using System.Text;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.IdentityModel.Tokens;
 using DTT_Backend_API.Data;
+using DTT_Backend_API.Services;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -15,6 +17,34 @@ builder.Services.AddOpenApi(); // Built-in OpenAPI in .NET 9
 var connString = builder.Configuration.GetConnectionString("DefaultConnection");
 builder.Services.AddDbContext<AppDbContext>(options =>
     options.UseNpgsql(connString));
+
+// Gemini API — GeminiService.GetReplyAsync tự set timeout theo Gemini:TimeoutSeconds
+// (xem Tai Lieu/ai_chatbot_roadmap.md mục 5.6), HttpClient chỉ cần dùng chung factory.
+// Ép kết nối qua IPv4 — một số mạng có IPv6 chập chờn/bị chặn khiến SocketsHttpHandler's Happy
+// Eyeballs "thử IPv6 trước" bị treo/rớt kết nối giữa chừng (SocketException khi đọc TLS response),
+// dù IPv4 vẫn thông bình thường (đã kiểm chứng qua curl/PowerShell tới cùng endpoint).
+builder.Services.AddHttpClient<GeminiService>()
+    .ConfigurePrimaryHttpMessageHandler(() => new SocketsHttpHandler
+    {
+        ConnectCallback = async (context, cancellationToken) =>
+        {
+            var entry = await System.Net.Dns.GetHostEntryAsync(context.DnsEndPoint.Host, System.Net.Sockets.AddressFamily.InterNetwork, cancellationToken);
+            var socket = new System.Net.Sockets.Socket(System.Net.Sockets.SocketType.Stream, System.Net.Sockets.ProtocolType.Tcp)
+            {
+                NoDelay = true
+            };
+            try
+            {
+                await socket.ConnectAsync(entry.AddressList[0], context.DnsEndPoint.Port, cancellationToken);
+                return new System.Net.Sockets.NetworkStream(socket, ownsSocket: true);
+            }
+            catch
+            {
+                socket.Dispose();
+                throw;
+            }
+        }
+    });
 
 // JWT Authentication
 var jwtSecretKey = builder.Configuration["Jwt:SecretKey"] ?? "DTT_Healthcare_Super_Secret_Key_2026_Graduation_Project";
@@ -33,6 +63,15 @@ builder.Services.AddAuthentication(options =>
         ValidateIssuer = false,
         ValidateAudience = false
     };
+});
+
+// Mọi endpoint yêu cầu JWT hợp lệ theo mặc định — controller/action nào cần công khai
+// (đăng nhập, đăng ký, OTP...) phải tự đánh dấu [AllowAnonymous] tường minh.
+builder.Services.AddAuthorization(options =>
+{
+    options.FallbackPolicy = new AuthorizationPolicyBuilder()
+        .RequireAuthenticatedUser()
+        .Build();
 });
 
 // CORS (Allow React Native Mobile App & Expo)
@@ -61,12 +100,6 @@ using (var scope = app.Services.CreateScope())
             db.SaveChanges();
             Console.WriteLine("[Seed] ✅ Đã thêm status_id=7 'CheckedIn' vào appointment_statuses.");
         }
-
-        // Tự động chuẩn hóa các hóa đơn test 235k cũ về mức công khám tiêu chuẩn 250.000đ trong DB
-        db.Database.ExecuteSqlRaw(@"
-            UPDATE invoice_items SET unit_price = 250000.00, amount = 250000.00 WHERE unit_price = 235000.00 OR amount = 235000.00;
-            UPDATE invoices SET total_amount = 250000.00, paid_amount = 250000.00 WHERE total_amount = 235000.00 OR paid_amount = 235000.00;
-        ");
     }
     catch (Exception ex)
     {
@@ -100,6 +133,6 @@ app.MapGet("/", () => Results.Ok(new
         "POST /api/auth/register",
         "GET /openapi/v1.json"
     }
-}));
+})).AllowAnonymous();
 
 app.Run();

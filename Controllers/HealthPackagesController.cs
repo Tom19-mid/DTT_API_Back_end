@@ -2,6 +2,7 @@ using System.Data;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using DTT_Backend_API.Data;
+using DTT_Backend_API.Helpers;
 using DTT_Backend_API.Models;
 
 namespace DTT_Backend_API.Controllers;
@@ -101,6 +102,7 @@ public class HealthPackagesController : ControllerBase
     [HttpPost("{id}/book")]
     public async Task<IActionResult> BookPackage(int id, [FromBody] BookPackageRequest req)
     {
+        if (!await AccessControl.CanAccessPatientAsync(User, _context, req.PatientId)) return this.ForbidJson();
         try
         {
             var pkg = await _context.HealthPackages.FirstOrDefaultAsync(p => p.PackageId == id && p.IsActive);

@@ -1,6 +1,7 @@
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using DTT_Backend_API.Data;
+using DTT_Backend_API.Helpers;
 using DTT_Backend_API.Models;
 using System.Globalization;
 
@@ -21,6 +22,7 @@ public class FamilyMembersController : ControllerBase
     [HttpGet("patient/{patientId}")]
     public async Task<IActionResult> GetPatientProfiles(int patientId)
     {
+        if (!await AccessControl.CanAccessPatientAsync(User, _context, patientId)) return this.ForbidJson();
         try
         {
             var result = new List<ProfileResponseDto>();
@@ -87,6 +89,7 @@ public class FamilyMembersController : ControllerBase
     [HttpPost]
     public async Task<IActionResult> CreateFamilyMember([FromBody] CreateFamilyMemberDto dto)
     {
+        if (!await AccessControl.CanAccessPatientAsync(User, _context, dto.OwnerPatientId)) return this.ForbidJson();
         try
         {
             if (string.IsNullOrWhiteSpace(dto.Name))
@@ -149,6 +152,8 @@ public class FamilyMembersController : ControllerBase
             if (id.StartsWith("owner_") || dto.IsOwner)
             {
                 int ownerId = dto.RealId > 0 ? dto.RealId : int.TryParse(id.Replace("owner_", ""), out int oid) ? oid : 0;
+                if (!await AccessControl.CanAccessPatientAsync(User, _context, ownerId)) return this.ForbidJson();
+
                 var owner = await _context.Patients.FirstOrDefaultAsync(p => p.PatientId == ownerId);
                 if (owner == null) return NotFound(new { success = false, message = "Không tìm thấy hồ sơ gốc." });
 
@@ -168,6 +173,8 @@ public class FamilyMembersController : ControllerBase
                 int memberId = dto.RealId > 0 ? dto.RealId : int.TryParse(id, out int mid) ? mid : 0;
                 var member = await _context.FamilyMembers.FirstOrDefaultAsync(m => m.MemberId == memberId);
                 if (member == null) return NotFound(new { success = false, message = "Không tìm thấy hồ sơ người thân." });
+
+                if (!await AccessControl.CanAccessPatientAsync(User, _context, member.OwnerPatientId)) return this.ForbidJson();
 
                 if (!string.IsNullOrWhiteSpace(dto.Name)) member.FullName = dto.Name.Trim().ToUpper();
                 if (!string.IsNullOrWhiteSpace(dto.Relationship)) member.Relationship = dto.Relationship.Trim();
@@ -193,6 +200,7 @@ public class FamilyMembersController : ControllerBase
     [HttpPatch("{id}/verify")]
     public async Task<IActionResult> VerifyFamilyMember(int id, [FromBody] VerifyPatientDto dto)
     {
+        if (!AccessControl.IsStaff(User)) return this.ForbidJson();
         try
         {
             var member = await _context.FamilyMembers.FirstOrDefaultAsync(m => m.MemberId == id);
@@ -256,6 +264,8 @@ public class FamilyMembersController : ControllerBase
             var member = await _context.FamilyMembers.FirstOrDefaultAsync(m => m.MemberId == memberId);
             if (member == null)
                 return NotFound(new { success = false, message = "Không tìm thấy hồ sơ để xóa." });
+
+            if (!await AccessControl.CanAccessPatientAsync(User, _context, member.OwnerPatientId)) return this.ForbidJson();
 
             _context.FamilyMembers.Remove(member);
             await _context.SaveChangesAsync();

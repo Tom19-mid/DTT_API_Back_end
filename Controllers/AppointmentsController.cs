@@ -3,6 +3,7 @@ using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using DTT_Backend_API.Data;
 using DTT_Backend_API.DTOs;
+using DTT_Backend_API.Helpers;
 using DTT_Backend_API.Models;
 
 namespace DTT_Backend_API.Controllers;
@@ -22,6 +23,7 @@ public class AppointmentsController : ControllerBase
     public async Task<IActionResult> CreateAppointment([FromBody] CreateAppointmentDto dto)
     {
         if (!ModelState.IsValid) return BadRequest(ModelState);
+        if (!await AccessControl.CanAccessPatientAsync(User, _context, dto.PatientId)) return this.ForbidJson();
 
         try
         {
@@ -254,6 +256,7 @@ public class AppointmentsController : ControllerBase
     [HttpGet("patient/{patientId}")]
     public async Task<IActionResult> GetPatientAppointments(int patientId)
     {
+        if (!await AccessControl.CanAccessPatientAsync(User, _context, patientId)) return this.ForbidJson();
         try
         {
             var list = await _context.Appointments
@@ -273,6 +276,9 @@ public class AppointmentsController : ControllerBase
     [HttpGet]
     public async Task<IActionResult> GetAllAppointments([FromQuery] int? doctorId, [FromQuery] string? date, [FromQuery] bool? todayOnly)
     {
+        // Danh sách toàn viện — chỉ nhân viên y tế (Lễ tân/Điều dưỡng/Bác sĩ/...) mới được xem,
+        // bệnh nhân phải dùng GET /api/appointments/patient/{patientId} (đã kiểm tra quyền riêng).
+        if (!AccessControl.IsStaff(User)) return this.ForbidJson();
         try
         {
             var query = _context.Appointments.AsQueryable();
@@ -324,6 +330,7 @@ public class AppointmentsController : ControllerBase
     [HttpPost("{id}/checkin")]
     public async Task<IActionResult> CheckInAppointment(int id)
     {
+        if (!AccessControl.IsStaff(User)) return this.ForbidJson();
         try
         {
             var appt = await _context.Appointments.FirstOrDefaultAsync(a => a.AppointmentId == id);
@@ -540,6 +547,8 @@ public class AppointmentsController : ControllerBase
     [HttpPut("{id}/cancel")]
     public async Task<IActionResult> CancelAppointment(int id, [FromBody] CancelAppointmentRequest? req = null)
     {
+        // Bệnh nhân được tự hủy ĐÚNG lịch hẹn của mình (App Mobile); nhân viên được hủy bất kỳ lịch nào.
+        if (!await AccessControl.CanAccessAppointmentAsync(User, _context, id)) return this.ForbidJson();
         try
         {
             var appt = await _context.Appointments.FirstOrDefaultAsync(a => a.AppointmentId == id);
@@ -596,6 +605,7 @@ public class AppointmentsController : ControllerBase
     [HttpPut("{id}/status")]
     public async Task<IActionResult> UpdateStatus(int id, [FromBody] UpdateStatusRequest? req = null)
     {
+        if (!AccessControl.IsStaff(User)) return this.ForbidJson();
         try
         {
             var appt = await _context.Appointments.FirstOrDefaultAsync(a => a.AppointmentId == id);
@@ -711,6 +721,7 @@ public class AppointmentsController : ControllerBase
     [HttpPut("{id}/nurse-vitals")]
     public async Task<IActionResult> SaveNurseVitals(int id, [FromBody] NurseVitalsRequest req)
     {
+        if (!AccessControl.IsStaff(User)) return this.ForbidJson();
         try
         {
             var appt = await _context.Appointments.FirstOrDefaultAsync(a => a.AppointmentId == id);

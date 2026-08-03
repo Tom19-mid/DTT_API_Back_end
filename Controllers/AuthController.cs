@@ -1,12 +1,14 @@
 using System.IdentityModel.Tokens.Jwt;
 using System.Security.Claims;
 using System.Text;
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.IdentityModel.Tokens;
 using BCrypt.Net;
 using DTT_Backend_API.Data;
 using DTT_Backend_API.DTOs;
+using DTT_Backend_API.Helpers;
 using DTT_Backend_API.Models;
 
 namespace DTT_Backend_API.Controllers;
@@ -24,6 +26,7 @@ public class AuthController : ControllerBase
         _config = config;
     }
 
+    [AllowAnonymous]
     [HttpPost("login")]
     public async Task<IActionResult> Login([FromBody] LoginRequestDto dto)
     {
@@ -35,20 +38,16 @@ public class AuthController : ControllerBase
             return Unauthorized(new { message = "Số điện thoại hoặc mật khẩu không chính xác." });
         }
 
-        // Verify password with BCrypt
-        bool isValidPassword = false;
+        // Verify password with BCrypt — không còn fallback so khớp plaintext, tránh mở lại
+        // đúng dạng lỗ hổng vừa gỡ (nếu password_hash không phải bcrypt hợp lệ, coi là sai).
+        bool isValidPassword;
         try
         {
             isValidPassword = BCrypt.Net.BCrypt.Verify(dto.Password, user.PasswordHash);
         }
         catch
         {
-            isValidPassword = user.PasswordHash == dto.Password;
-        }
-
-        if (!isValidPassword && (dto.Password == "123456" || dto.Password == "12345678" || dto.Password.StartsWith("DTT@") || (user.PasswordHash != null && user.PasswordHash.EndsWith("_DTT_temp")) || (user.PasswordHash != null && user.PasswordHash.Contains("N9qo8uLOickgx2ZMRZoMyeIjZAgcfl7p92ldGxad6J1B4B1V6K6Ne"))))
-        {
-            isValidPassword = true;
+            isValidPassword = false;
         }
 
         if (!isValidPassword)
@@ -72,6 +71,7 @@ public class AuthController : ControllerBase
         });
     }
 
+    [AllowAnonymous]
     [HttpPost("doctor-login")]
     public async Task<IActionResult> DoctorLogin([FromBody] LoginRequestDto dto)
     {
@@ -83,19 +83,14 @@ public class AuthController : ControllerBase
             return Unauthorized(new { message = "Số điện thoại hoặc mật khẩu không chính xác." });
         }
 
-        bool isValidPassword = false;
+        bool isValidPassword;
         try
         {
             isValidPassword = BCrypt.Net.BCrypt.Verify(dto.Password, user.PasswordHash);
         }
         catch
         {
-            isValidPassword = user.PasswordHash == dto.Password;
-        }
-
-        if (!isValidPassword && (dto.Password == "123456" || dto.Password == "12345678" || user.PasswordHash.Contains("N9qo8uLOickgx2ZMRZoMyeIjZAgcfl7p92ldGxad6J1B4B1V6K6Ne")))
-        {
-            isValidPassword = true;
+            isValidPassword = false;
         }
 
         if (!isValidPassword)
@@ -144,7 +139,10 @@ public class AuthController : ControllerBase
             RoleId = user.RoleId,
             RoleCode = roleCode,
             RoleName = roleName,
-            FullName = doctor?.FullName ?? (roleName + " " + (user.PhoneNumber.Length > 4 ? user.PhoneNumber.Substring(user.PhoneNumber.Length - 4) : "")),
+            // Ưu tiên users.full_name (add_staff_full_names.sql — dành cho role không có hồ sơ riêng
+            // như Lễ tân/Điều dưỡng/KTV/Dược sĩ), rồi tới Doctors.FullName, cuối cùng mới fallback.
+            FullName = (!string.IsNullOrWhiteSpace(user.FullName) ? user.FullName : doctor?.FullName)
+                ?? (roleName + " " + (user.PhoneNumber.Length > 4 ? user.PhoneNumber.Substring(user.PhoneNumber.Length - 4) : "")),
             Degree = doctor?.Degree ?? roleName,
             ClinicRoom = doctor?.ClinicRoom ?? "Quầy làm việc",
             SpecialtyId = doctor?.SpecialtyId ?? 1,
@@ -154,6 +152,7 @@ public class AuthController : ControllerBase
         });
     }
 
+    [AllowAnonymous]
     [HttpPost("register")]
     public async Task<IActionResult> Register([FromBody] RegisterRequestDto dto)
     {
@@ -194,16 +193,29 @@ public class AuthController : ControllerBase
         await _context.SaveChangesAsync();
 
         // 3. Save Patient profile SECOND linked to saved User
-        var patient = new Patient
+        // DB có trigger trg_create_profile_on_user_insert (AFTER INSERT ON users) tự động tạo sẵn 1
+        // dòng patients rỗng cho user vừa tạo ở bước 2 — nên KHÔNG được insert thêm 1 dòng mới ở đây
+        // (sẽ vi phạm patients_user_id_key, lỗi 500 với MỌI lần đăng ký). Phải tìm dòng trigger đã tạo
+        // rồi UPDATE lại đúng thông tin thật của bệnh nhân, chỉ insert mới khi trigger chưa/không chạy.
+        var patient = await _context.Patients.FirstOrDefaultAsync(p => p.UserId == user.UserId);
+        if (patient != null)
         {
-            UserId = user.UserId,
-            FullName = dto.FullName,
-            PhoneNumber = dto.Phone,
-            VerificationStatus = "pending",
-            CreatedAt = DateTime.UtcNow
-        };
-
-        _context.Patients.Add(patient);
+            patient.FullName = dto.FullName;
+            patient.PhoneNumber = dto.Phone;
+            patient.VerificationStatus = "pending";
+        }
+        else
+        {
+            patient = new Patient
+            {
+                UserId = user.UserId,
+                FullName = dto.FullName,
+                PhoneNumber = dto.Phone,
+                VerificationStatus = "pending",
+                CreatedAt = DateTime.UtcNow
+            };
+            _context.Patients.Add(patient);
+        }
         await _context.SaveChangesAsync();
 
         var token = GenerateJwtToken(user);
@@ -240,8 +252,8 @@ public class AuthController : ControllerBase
         {
             new Claim(ClaimTypes.NameIdentifier, user.UserId.ToString()),
             new Claim(ClaimTypes.MobilePhone, user.PhoneNumber),
-            new Claim(ClaimTypes.Email, user.Email),
-            new Claim(ClaimTypes.Role, "Patient")
+            new Claim(ClaimTypes.Email, user.Email ?? string.Empty),
+            new Claim("role_id", user.RoleId.ToString())
         };
 
         var token = new JwtSecurityToken(
@@ -260,6 +272,7 @@ public class AuthController : ControllerBase
     private static readonly Dictionary<string, (string Code, DateTime Expiry)> _otpStore = new();
 
     // POST /api/auth/send-otp — Tạo & gửi mã OTP (6 số) cho số điện thoại
+    [AllowAnonymous]
     [HttpPost("send-otp")]
     public async Task<IActionResult> SendOtp([FromBody] SendOtpDto dto)
     {
@@ -292,6 +305,7 @@ public class AuthController : ControllerBase
     }
 
     // POST /api/auth/verify-otp — Xác minh mã OTP (dùng cho đăng ký / quên mật khẩu)
+    [AllowAnonymous]
     [HttpPost("verify-otp")]
     public async Task<IActionResult> VerifyOtp([FromBody] VerifyOtpDto dto)
     {
@@ -325,6 +339,7 @@ public class AuthController : ControllerBase
     }
 
     // POST /api/auth/reset-password — Đặt lại mật khẩu sau khi xác minh OTP
+    [AllowAnonymous]
     [HttpPost("reset-password")]
     public async Task<IActionResult> ResetPassword([FromBody] ResetPasswordDto dto)
     {
@@ -365,6 +380,9 @@ public class AuthController : ControllerBase
     {
         try
         {
+            if (!await AccessControl.CanAccessPatientAsync(User, _context, dto.PatientId))
+                return this.ForbidJson();
+
             var patient = await _context.Patients.FirstOrDefaultAsync(p => p.PatientId == dto.PatientId);
             if (patient == null)
                 return NotFound(new { message = "Không tìm thấy hồ sơ bệnh nhân." });
@@ -402,13 +420,14 @@ public class AuthController : ControllerBase
     {
         try
         {
+            if (!AccessControl.IsSelfByPhone(User, dto.Phone))
+                return this.ForbidJson();
+
             var user = await _context.Users.FirstOrDefaultAsync(u => u.PhoneNumber == dto.Phone);
             if (user == null)
                 return NotFound(new { message = "Không tìm thấy tài khoản." });
 
-            bool isCurrentValid = false;
-            try { isCurrentValid = BCrypt.Net.BCrypt.Verify(dto.CurrentPassword, user.PasswordHash); }
-            catch { isCurrentValid = user.PasswordHash == dto.CurrentPassword; }
+            bool isCurrentValid = BCrypt.Net.BCrypt.Verify(dto.CurrentPassword, user.PasswordHash);
 
             if (!isCurrentValid)
                 return BadRequest(new { success = false, message = "Mật khẩu hiện tại không chính xác." });

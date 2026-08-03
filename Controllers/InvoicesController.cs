@@ -1,6 +1,7 @@
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using DTT_Backend_API.Data;
+using DTT_Backend_API.Helpers;
 using DTT_Backend_API.Models;
 using System.Linq;
 
@@ -23,6 +24,8 @@ public class InvoicesController : ControllerBase
     [HttpGet("estimate/{appointmentId}")]
     public async Task<IActionResult> GetEstimate(int appointmentId)
     {
+        if (!await AccessControl.CanAccessAppointmentAsync(User, _context, appointmentId)) return this.ForbidJson();
+
         var appt = await _context.Appointments.FirstOrDefaultAsync(a => a.AppointmentId == appointmentId);
         if (appt == null) return NotFound(new { success = false, message = "Không tìm thấy lịch hẹn." });
 
@@ -83,7 +86,7 @@ public class InvoicesController : ControllerBase
         return details.Sum(d => d.Quantity * (medDict.ContainsKey(d.MedicineId) && medDict[d.MedicineId].Price > 0 ? medDict[d.MedicineId].Price : 15000m));
     }
 
-    // Tính phí Xét nghiệm/Siêu âm THẬT đã được Bác sĩ chỉ định (medical_services.price qua service_id) —
+    // Tính phí Xét nghiệm/Siêu âm THẬT đã được Bác sĩ chỉ định (clinical_services.unit_price qua service_id) —
     // trước đây servicesFee luôn = 0 cố định ở đây dù ConfirmPayment đã có sẵn tham số ServicesFee,
     // khiến phí CLS bị "biến mất" khỏi hóa đơn cuối cùng dù đã được cộng lúc bác sĩ hoàn tất khám.
     private async Task<decimal> ComputeClsFeeAsync(int appointmentId)
@@ -104,6 +107,9 @@ public class InvoicesController : ControllerBase
     [HttpPost("confirm-payment")]
     public async Task<IActionResult> ConfirmPayment([FromBody] ConfirmPaymentDto dto)
     {
+        // Chỉ Lễ Tân/nhân viên mới được xác nhận đã thu tiền — bệnh nhân không được tự đánh dấu
+        // hóa đơn của mình là "đã thanh toán" mà không thực sự trả tiền tại quầy.
+        if (!AccessControl.IsStaff(User)) return this.ForbidJson();
         try
         {
             // 1. Tìm appointment và patient
@@ -119,23 +125,21 @@ public class InvoicesController : ControllerBase
                 return Ok(new { success = true, message = "Hóa đơn đã được thanh toán trước đó.", invoiceId = existingPaidInvoice.InvoiceId, alreadyPaid = true });
             }
 
-            // 3. Tính tổng tiền từ các khoản (khám + CLS + thuốc)
-            decimal examFee = dto.ExamFee > 0 ? dto.ExamFee : 250000m;
-            decimal servicesFee = dto.ServicesFee > 0 ? dto.ServicesFee : await ComputeClsFeeAsync(dto.AppointmentId);
-            decimal medsFee = dto.MedsFee > 0 ? dto.MedsFee : 0m;
-
-            // 4. Nếu Lễ Tân không truyền medsFee (hoặc =0), tính lại từ đơn thuốc điện tử thật trong DB
-            if (dto.AppointmentId > 0 && medsFee == 0)
-            {
-                medsFee = await ComputeMedsFeeAsync(dto.AppointmentId);
-            }
+            // 3. Tính tổng tiền từ các khoản (khám + CLS + thuốc) — LUÔN tính lại phía server từ dữ liệu
+            // thật trong DB, KHÔNG tin số tiền client (Lễ Tân/WinForms) gửi lên, để tránh hóa đơn bị
+            // chỉnh sửa tùy ý qua request giả mạo.
+            bool isPackage = appt.Note?.Contains("Gói khám:") == true;
+            decimal examFee = isPackage ? (ExtractPriceFromNote(appt.Note) ?? 250000m) : 250000m;
+            decimal servicesFee = await ComputeClsFeeAsync(dto.AppointmentId);
+            decimal medsFee = await ComputeMedsFeeAsync(dto.AppointmentId);
 
             decimal totalAmount = examFee + servicesFee + medsFee;
 
             Invoice invoice;
 
-            // 5. Tim invoice pending (tao tu MedicalRecordsController khi bac si hoan tat)
-            var pendingInvoice = await _context.Invoices.FirstOrDefaultAsync(i => i.AppointmentId == dto.AppointmentId && i.PaymentStatus == "pending");
+            // 5. Tim invoice unpaid (tao tu MedicalRecordsController khi bac si hoan tat) — DB
+            // chk_payment_status chi cho phep 'unpaid'/'partial'/'paid', khong co 'pending'.
+            var pendingInvoice = await _context.Invoices.FirstOrDefaultAsync(i => i.AppointmentId == dto.AppointmentId && i.PaymentStatus == "unpaid");
             if (pendingInvoice != null)
             {
                 invoice = pendingInvoice;
@@ -244,6 +248,7 @@ public class InvoicesController : ControllerBase
     [HttpGet("by-appointment/{appointmentId}")]
     public async Task<IActionResult> GetByAppointment(int appointmentId)
     {
+        if (!await AccessControl.CanAccessAppointmentAsync(User, _context, appointmentId)) return this.ForbidJson();
         try
         {
             var invoice = await _context.Invoices.FirstOrDefaultAsync(i => i.AppointmentId == appointmentId);
@@ -278,6 +283,7 @@ public class InvoicesController : ControllerBase
     [HttpPost("register-walkin")]
     public async Task<IActionResult> RegisterWalkIn([FromBody] RegisterWalkInDto dto)
     {
+        if (!AccessControl.IsStaff(User)) return this.ForbidJson();
         try
         {
             if (string.IsNullOrWhiteSpace(dto.FullName) || string.IsNullOrWhiteSpace(dto.Phone))
@@ -293,6 +299,8 @@ public class InvoicesController : ControllerBase
             // Kiểm tra xem User đã tồn tại theo SĐT chưa để tránh trùng lặp
             var existingUser = await _context.Users.FirstOrDefaultAsync(u => u.PhoneNumber == dto.Phone);
             Guid targetUserId;
+            string csvPasswordHash = existingUser?.PasswordHash ?? string.Empty;
+            int csvRoleId = existingUser?.RoleId ?? 3;
             if (existingUser != null)
             {
                 targetUserId = existingUser.UserId;
@@ -303,7 +311,7 @@ public class InvoicesController : ControllerBase
                 {
                     Email = $"{dto.Phone}@gmail.com", // Dùng @gmail.com để đáp ứng check constraint users_email_check
                     PhoneNumber = dto.Phone,
-                    PasswordHash = dto.Phone + "_DTT_temp",
+                    PasswordHash = BCrypt.Net.BCrypt.HashPassword(randomPwd),
                     Status = "Active",
                     CreatedAt = DateTime.UtcNow,
                     UpdatedAt = DateTime.UtcNow
@@ -315,6 +323,8 @@ public class InvoicesController : ControllerBase
                 _context.Users.Add(newUser);
                 await _context.SaveChangesAsync();
                 targetUserId = newUser.UserId;
+                csvPasswordHash = newUser.PasswordHash;
+                csvRoleId = newUser.RoleId;
             }
 
             // Tìm hồ sơ Patient sẵn có hoặc tạo mới
@@ -336,7 +346,15 @@ public class InvoicesController : ControllerBase
                 var receptionistUser = await _context.Users.FirstOrDefaultAsync(u => u.RoleId == 4 || u.Email == "letan.minhchau@gmail.com");
                 DateTime? dob = null;
                 if (!string.IsNullOrEmpty(dto.DateOfBirth) && DateTime.TryParse(dto.DateOfBirth, out DateTime parsedDob))
+                {
+                    // Ngày sinh là optional (lễ tân có thể chưa hỏi kịp), nhưng NẾU có nhập thì phải hợp lý —
+                    // chặn ngày tương lai và tuổi phi thực tế thay vì chấp nhận bất kỳ ngày nào parse được.
+                    if (parsedDob.Date > DateTime.UtcNow.Date)
+                        return BadRequest(new { success = false, message = "Ngày sinh không được ở tương lai." });
+                    if (parsedDob.Date < DateTime.UtcNow.Date.AddYears(-120))
+                        return BadRequest(new { success = false, message = "Ngày sinh không hợp lệ (quá 120 năm trước)." });
                     dob = parsedDob;
+                }
 
                 var newPatient = new Patient
                 {
@@ -508,7 +526,7 @@ public class InvoicesController : ControllerBase
                     string usersCsv = System.IO.Path.Combine(dbDir, "users.csv");
                     if (System.IO.File.Exists(usersCsv))
                     {
-                        string userRow = $"\"{targetUserId}\",\"{dto.Phone}\",\"{dto.Phone}@gmail.com\",\"$2a$11$N9qo8uLOickgx2ZMRZoMyeIjZAgcfl7p92ldGxad6J1B4B1V6K6Ne\",1,\"Active\",NULL,\"{DateTime.Now:yyyy-MM-dd HH:mm:ss.ffffff}\",\"{DateTime.Now:yyyy-MM-dd HH:mm:ss.ffffff}\"";
+                        string userRow = $"\"{targetUserId}\",\"{dto.Phone}\",\"{dto.Phone}@gmail.com\",\"{csvPasswordHash}\",{csvRoleId},\"Active\",NULL,\"{DateTime.Now:yyyy-MM-dd HH:mm:ss.ffffff}\",\"{DateTime.Now:yyyy-MM-dd HH:mm:ss.ffffff}\"";
                         System.IO.File.AppendAllLines(usersCsv, new[] { userRow });
                     }
 

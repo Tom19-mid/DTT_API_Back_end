@@ -47,6 +47,12 @@ public class User
     [Column("role_id")]
     public int RoleId { get; set; } = 3; // 3 = Patient (1 = Admin, 2 = Doctor trong bảng roles thật)
 
+    // Chỉ có giá trị thật cho các role nhân viên KHÔNG có hồ sơ riêng (Lễ tân/Điều dưỡng/KTV/Dược sĩ) —
+    // xem add_staff_full_names.sql. Bác sĩ vẫn dùng Doctors.FullName, bệnh nhân dùng Patients.FullName.
+    [Column("full_name")]
+    [StringLength(255)]
+    public string? FullName { get; set; }
+
     [Column("status")]
     [StringLength(20)]
     public string Status { get; set; } = "Active";
@@ -945,4 +951,63 @@ public class PrescriptionDetail
 
     [Column("updated_at")]
     public DateTime UpdatedAt { get; set; } = DateTime.UtcNow;
+}
+
+// ── AI Symptom Checker + Escalate to Staff ─────────────────────────────────────
+// Xem Tai Lieu/ai_chatbot_luong_nghiep_vu.md — 1 session = 1 phiên chat của bệnh nhân,
+// bắt đầu ở status 'AI' (trò chuyện với Gemini), có thể chuyển 'Escalated' (Lễ tân tiếp
+// nhận) rồi 'Closed'. Bảng tạo bởi ai_chatbot_migration.sql ở repo root.
+[Table("chat_sessions")]
+public class ChatSession
+{
+    [Key]
+    [Column("session_id")]
+    public int SessionId { get; set; }
+
+    [Column("patient_id")]
+    public int PatientId { get; set; }
+
+    [Column("status")]
+    [StringLength(20)]
+    public string Status { get; set; } = "AI"; // 'AI' | 'Escalated' | 'Closed'
+
+    [Column("suggested_specialty_id")]
+    public int? SuggestedSpecialtyId { get; set; }
+
+    [Column("assigned_staff_id")]
+    public Guid? AssignedStaffId { get; set; }
+
+    [Column("created_at")]
+    public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
+
+    [Column("updated_at")]
+    public DateTime UpdatedAt { get; set; } = DateTime.UtcNow;
+
+    [Column("closed_at")]
+    public DateTime? ClosedAt { get; set; }
+}
+
+[Table("chat_messages")]
+public class ChatMessage
+{
+    [Key]
+    [Column("message_id")]
+    public int MessageId { get; set; }
+
+    [Column("session_id")]
+    public int SessionId { get; set; }
+
+    [Column("sender_type")]
+    [StringLength(10)]
+    public string SenderType { get; set; } = string.Empty; // 'Patient' | 'AI' | 'Staff'
+
+    [Column("sender_user_id")]
+    public Guid? SenderUserId { get; set; } // NULL khi SenderType = 'AI'
+
+    [Required]
+    [Column("content")]
+    public string Content { get; set; } = string.Empty;
+
+    [Column("created_at")]
+    public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
 }

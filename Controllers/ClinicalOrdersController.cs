@@ -2,14 +2,18 @@ using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using DTT_Backend_API.Data;
 using DTT_Backend_API.DTOs;
+using DTT_Backend_API.Helpers;
 using DTT_Backend_API.Models;
 
 namespace DTT_Backend_API.Controllers;
 
 // Luồng Bác sĩ chỉ định Xét nghiệm/Siêu âm khi "Đang Khám" (status=3) và
 // Kỹ thuật viên (LAB_TECH) xử lý + trả kết quả cận lâm sàng (CLS).
+// Toàn bộ controller chỉ dành cho nhân viên y tế — App Mobile bệnh nhân không gọi
+// tới controller này (đã xác nhận không có usage nào trong DTT_App_Patients).
 [ApiController]
 [Route("api/[controller]")]
+[StaffOnly]
 public class ClinicalOrdersController : ControllerBase
 {
     private readonly AppDbContext _context;
@@ -83,11 +87,14 @@ public class ClinicalOrdersController : ControllerBase
             var record = await _context.MedicalRecords.FirstOrDefaultAsync(r => r.AppointmentId == dto.AppointmentId);
             if (record == null)
             {
+                // Dùng patient_id/doctor_id đã xác minh từ chính appointment trong DB, KHÔNG lấy trực
+                // tiếp từ dto — tránh nguy cơ hồ sơ khám bị gắn nhầm bệnh nhân/bác sĩ nếu client gửi
+                // sai (dto.PatientId/dto.DoctorId chỉ còn dùng để đối chiếu, không phải nguồn ghi DB).
                 record = new MedicalRecord
                 {
                     AppointmentId = dto.AppointmentId,
-                    PatientId = dto.PatientId,
-                    DoctorId = dto.DoctorId,
+                    PatientId = appt.PatientId,
+                    DoctorId = appt.DoctorId,
                     ExaminationDate = DateTime.UtcNow,
                     Status = "Draft",
                     CreatedAt = DateTime.UtcNow,

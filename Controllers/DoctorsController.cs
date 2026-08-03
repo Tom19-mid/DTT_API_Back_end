@@ -20,20 +20,6 @@ public class DoctorsController : ControllerBase
     [HttpGet]
     public async Task<IActionResult> GetDoctors([FromQuery] int? specialtyId)
     {
-        // 0. Auto-cleanup non-doctor staff records and duplicates from doctors table
-        try
-        {
-            await _context.Database.ExecuteSqlRawAsync("DELETE FROM doctor_schedule_slots WHERE schedule_id IN (SELECT schedule_id FROM doctor_schedules WHERE doctor_id IN (SELECT doctor_id FROM doctors WHERE full_name = 'ThS. BS Trần Văn C' AND doctor_id <> 3));");
-            await _context.Database.ExecuteSqlRawAsync("DELETE FROM doctor_schedules WHERE doctor_id IN (SELECT doctor_id FROM doctors WHERE full_name = 'ThS. BS Trần Văn C' AND doctor_id <> 3);");
-            await _context.Database.ExecuteSqlRawAsync("DELETE FROM appointments WHERE doctor_id IN (SELECT doctor_id FROM doctors WHERE full_name = 'ThS. BS Trần Văn C' AND doctor_id <> 3);");
-            await _context.Database.ExecuteSqlRawAsync("DELETE FROM doctors WHERE full_name = 'ThS. BS Trần Văn C' AND doctor_id <> 3;");
-
-            await _context.Database.ExecuteSqlRawAsync("DELETE FROM doctor_schedule_slots WHERE schedule_id IN (SELECT schedule_id FROM doctor_schedules WHERE doctor_id IN (SELECT doctor_id FROM doctors WHERE full_name NOT LIKE '%BS.%' AND full_name NOT LIKE '%Bác sĩ%' AND full_name NOT LIKE '%ThS.%' AND full_name NOT LIKE '%TS.%'));");
-            await _context.Database.ExecuteSqlRawAsync("DELETE FROM doctor_schedules WHERE doctor_id IN (SELECT doctor_id FROM doctors WHERE full_name NOT LIKE '%BS.%' AND full_name NOT LIKE '%Bác sĩ%' AND full_name NOT LIKE '%ThS.%' AND full_name NOT LIKE '%TS.%');");
-            await _context.Database.ExecuteSqlRawAsync("DELETE FROM doctors WHERE full_name NOT LIKE '%BS.%' AND full_name NOT LIKE '%Bác sĩ%' AND full_name NOT LIKE '%ThS.%' AND full_name NOT LIKE '%TS.%';");
-        }
-        catch { }
-
         var doctorMasterList = new[]
         {
             new { Name = "BS. CKII Nguyễn Văn A", Degree = "Chuyên khoa II Nội tổng quát", Exp = 15, Room = "Phòng 101", Rating = 4.9m, Reviews = 145, Phone = "0901111111", Email = "doctor1@gmail.com", SpecId = 1, WorkingDays = "Thứ Hai, Tư, Sáu & Chủ Nhật" },

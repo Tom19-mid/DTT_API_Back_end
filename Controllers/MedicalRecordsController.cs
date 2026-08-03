@@ -1,6 +1,7 @@
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using DTT_Backend_API.Data;
+using DTT_Backend_API.Helpers;
 using DTT_Backend_API.Models;
 using System.Linq;
 
@@ -63,6 +64,7 @@ public class MedicalRecordsController : ControllerBase
     [HttpGet("patient/{patientId}")]
     public async Task<IActionResult> GetPatientMedicalRecords(int patientId)
     {
+        if (!await AccessControl.CanAccessPatientAsync(User, _context, patientId)) return this.ForbidJson();
         try
         {
             var docList = await _context.Doctors.ToListAsync();
@@ -253,6 +255,7 @@ public class MedicalRecordsController : ControllerBase
     [HttpGet("all")]
     public async Task<IActionResult> GetAllMedicalRecords([FromQuery] string? search, [FromQuery] int? doctorId)
     {
+        if (!AccessControl.IsStaff(User)) return this.ForbidJson();
         try
         {
             var query = _context.MedicalRecords.AsQueryable();
@@ -450,6 +453,9 @@ public class MedicalRecordsController : ControllerBase
     [HttpPost]
     public async Task<IActionResult> CreateMedicalRecord([FromBody] CreateMedicalRecordDto dto)
     {
+        // Chỉ Bác sĩ/nhân viên mới được tạo hồ sơ khám bệnh — hành động này thật sự trừ tồn kho
+        // thuốc và tạo hóa đơn, bệnh nhân không được tự bịa hồ sơ khám cho bất kỳ ai.
+        if (!AccessControl.IsStaff(User)) return this.ForbidJson();
         try
         {
             // 1. Tái sử dụng phiếu khám Draft đã tạo sẵn (vd: do đã chỉ định CLS qua
@@ -575,7 +581,7 @@ public class MedicalRecordsController : ControllerBase
                     }
                 }
 
-                // Phí Xét nghiệm/Siêu âm đã chỉ định cho phiếu khám này (medical_services.price qua service_id)
+                // Phí Xét nghiệm/Siêu âm đã chỉ định cho phiếu khám này (clinical_services.unit_price qua service_id)
                 var clsServiceIds = new List<int>();
                 clsServiceIds.AddRange(await _context.MedicalTests.Where(t => t.MedicalRecordId == record.MedicalRecordId && t.ServiceId != null).Select(t => t.ServiceId!.Value).ToListAsync());
                 clsServiceIds.AddRange(await _context.UltrasoundResults.Where(u => u.MedicalRecordId == record.MedicalRecordId && u.ServiceId != null).Select(u => u.ServiceId!.Value).ToListAsync());
@@ -595,7 +601,10 @@ public class MedicalRecordsController : ControllerBase
                     PatientId = dto.PatientId,
                     TotalAmount = totalAmount,
                     PaidAmount = 0,           // Chua thu tien
-                    PaymentStatus = "pending", // Le tan chua xac nhan
+                    // DB chk_payment_status chỉ cho phép 'unpaid'/'partial'/'paid' — KHÔNG có 'pending'.
+                    // PaidAmount=0 ở trên đã đúng nghĩa "unpaid", trước đây dùng "pending" (giá trị không
+                    // hợp lệ) khiến INSERT bị PostgreSQL từ chối (23514) mỗi lần có tạo invoice ở đây.
+                    PaymentStatus = "unpaid", // Le tan chua xac nhan
                     PaymentMethod = null,
                     InvoiceDate = DateTime.UtcNow,
                     CreatedAt = DateTime.UtcNow,

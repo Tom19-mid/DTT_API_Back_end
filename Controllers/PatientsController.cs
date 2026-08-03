@@ -1,6 +1,7 @@
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using DTT_Backend_API.Data;
+using DTT_Backend_API.Helpers;
 using DTT_Backend_API.Models;
 using System.Linq;
 
@@ -23,6 +24,7 @@ public class PatientsController : ControllerBase
     [HttpGet]
     public async Task<IActionResult> GetAllPatients()
     {
+        if (!AccessControl.IsStaff(User)) return this.ForbidJson();
         try
         {
             // patients.phone_number có thể NULL với các hồ sơ cũ/tạo qua vài luồng khác nhau,
@@ -87,6 +89,7 @@ public class PatientsController : ControllerBase
     [HttpGet("pending")]
     public async Task<IActionResult> GetPendingPatients()
     {
+        if (!AccessControl.IsStaff(User)) return this.ForbidJson();
         try
         {
             var patients = await (
@@ -118,6 +121,7 @@ public class PatientsController : ControllerBase
     [HttpPatch("{id}/verify")]
     public async Task<IActionResult> VerifyPatient(int id, [FromBody] VerifyPatientDto dto)
     {
+        if (!AccessControl.IsStaff(User)) return this.ForbidJson();
         try
         {
             var p = await _context.Patients.FirstOrDefaultAsync(x => x.PatientId == id);
@@ -183,6 +187,7 @@ public class PatientsController : ControllerBase
     [HttpGet("{id}")]
     public async Task<IActionResult> GetPatient(int id)
     {
+        if (!await AccessControl.CanAccessPatientAsync(User, _context, id)) return this.ForbidJson();
         try
         {
             var p = await _context.Patients.FirstOrDefaultAsync(x => x.PatientId == id);
@@ -225,11 +230,18 @@ public class PatientsController : ControllerBase
                 return BadRequest(new { success = false, message = "Mã QR thiếu thông tin liên kết hợp lệ." });
             }
 
+            int ownerIdToCheck = dto.OwnerPatientId > 0 ? dto.OwnerPatientId : 2;
+            if (!await AccessControl.CanAccessPatientAsync(User, _context, ownerIdToCheck)) return this.ForbidJson();
+
             int targetId = 0;
             string cleanId = dto.PatientId.Replace("#", "").Replace("F", "").Replace("P", "");
             int.TryParse(cleanId, out targetId);
 
-            // Create a verified family member profile linked via hospital QR
+            // Tạo hồ sơ người thân liên kết qua QR nhưng ở trạng thái "pending" — KHÔNG tự động
+            // "verified". VerifyCode ở đây không được đối chiếu với bất kỳ dữ liệu thật nào (chưa có
+            // hạ tầng QR viện thật), nên trước đây bất kỳ bệnh nhân nào cũng tự tạo được hồ sơ người
+            // thân "đã xác thực" giả với tên/SĐT/BHYT tùy ý. Giờ bắt buộc đi qua đúng hàng đợi Lễ Tân
+            // duyệt CCCD thật như mọi hồ sơ người thân khác (FamilyMembersController.VerifyFamilyMember).
             var newMember = new FamilyMember
             {
                 OwnerPatientId = dto.OwnerPatientId > 0 ? dto.OwnerPatientId : 2,
@@ -238,9 +250,8 @@ public class PatientsController : ControllerBase
                 Gender = "Nam",
                 PhoneNumber = "0918889999",
                 HealthInsuranceNumber = $"QR{dto.VerifyCode}{Random.Shared.Next(1000, 9999)}",
-                VerificationStatus = "verified",
-                VerificationNote = $"Đã liên kết & xác minh chính chủ qua Mã QR viện (Xác thực: {dto.VerifyCode})",
-                VerifiedAt = DateTime.UtcNow,
+                VerificationStatus = "pending",
+                VerificationNote = $"Đã liên kết qua Mã QR viện (Mã: {dto.VerifyCode}) — chờ Lễ Tân đối chiếu CCCD thực tế để xác thực.",
                 CreatedAt = DateTime.UtcNow,
                 UpdatedAt = DateTime.UtcNow
             };
@@ -251,7 +262,7 @@ public class PatientsController : ControllerBase
             return Ok(new
             {
                 success = true,
-                message = $"Đã liên kết thành công hồ sơ bệnh nhân #{dto.PatientId} vào tài khoản của bạn.",
+                message = $"Đã liên kết hồ sơ bệnh nhân #{dto.PatientId} — vui lòng mang CCCD ra quầy Lễ Tân để hoàn tất xác thực.",
                 profile = new
                 {
                     id = newMember.MemberId.ToString(),
@@ -260,8 +271,8 @@ public class PatientsController : ControllerBase
                     name = newMember.FullName,
                     patientId = $"#F{newMember.MemberId:D5}",
                     relationship = newMember.Relationship,
-                    verificationStatus = "verified",
-                    isVerified = true,
+                    verificationStatus = "pending",
+                    isVerified = false,
                     verificationNote = newMember.VerificationNote,
                     dob = "01/01/1985",
                     gender = newMember.Gender,

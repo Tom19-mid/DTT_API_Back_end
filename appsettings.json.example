@@ -1,0 +1,22 @@
+{
+  "Logging": {
+    "LogLevel": {
+      "Default": "Information",
+      "Microsoft.AspNetCore": "Warning"
+    }
+  },
+  "ConnectionStrings": {
+    "DefaultConnection": "Host=YOUR_DB_HOST;Port=5432;Database=dtt_healthcare;Username=YOUR_DB_USER;Password=YOUR_DB_PASSWORD;Include Error Detail=true"
+  },
+  "Jwt": {
+    "SecretKey": "CHANGE_ME_TO_A_LONG_RANDOM_SECRET",
+    "Issuer": "DTT_Backend",
+    "Audience": "DTT_Patients_App"
+  },
+  "Gemini": {
+    "ApiKey": "YOUR_GEMINI_API_KEY",
+    "Model": "gemini-2.5-flash",
+    "TimeoutSeconds": 15
+  },
+  "AllowedHosts": "*"
+}

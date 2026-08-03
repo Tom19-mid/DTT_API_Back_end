@@ -1,7 +1,7 @@
 namespace DTT_Backend_API.DTOs;
 
 // Bác sĩ chỉ định Xét nghiệm/Siêu âm/cả hai ngay trong lúc "Đang Khám" (status=3).
-// serviceIds trỏ tới medical_services — trộn lẫn cả loại 'Test' và 'Ultrasound' trong 1 lần chỉ định.
+// serviceIds trỏ tới clinical_services — trộn lẫn cả loại 'Test' và 'Ultrasound' trong 1 lần chỉ định.
 public class CreateClinicalOrdersDto
 {
     public int AppointmentId { get; set; }

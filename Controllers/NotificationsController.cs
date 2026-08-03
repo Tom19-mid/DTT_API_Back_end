@@ -1,6 +1,7 @@
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using DTT_Backend_API.Data;
+using DTT_Backend_API.Helpers;
 using DTT_Backend_API.Models;
 
 namespace DTT_Backend_API.Controllers;
@@ -20,6 +21,7 @@ public class NotificationsController : ControllerBase
     [HttpGet("patient/{patientId}")]
     public async Task<IActionResult> GetPatientNotifications(int patientId)
     {
+        if (!await AccessControl.CanAccessPatientAsync(User, _context, patientId)) return this.ForbidJson();
         try
         {
             var patient = await _context.Patients.FirstOrDefaultAsync(p => p.PatientId == patientId);
@@ -104,6 +106,8 @@ public class NotificationsController : ControllerBase
             var noti = await _context.Notifications.FindAsync(id);
             if (noti == null) return NotFound(new { success = false, message = "Không tìm thấy thông báo." });
 
+            if (!AccessControl.CanAccessUserId(User, noti.UserId)) return this.ForbidJson();
+
             if (!noti.IsRead)
             {
                 noti.IsRead = true;
@@ -123,6 +127,7 @@ public class NotificationsController : ControllerBase
     [HttpPut("patient/{patientId}/read-all")]
     public async Task<IActionResult> MarkAllAsRead(int patientId)
     {
+        if (!await AccessControl.CanAccessPatientAsync(User, _context, patientId)) return this.ForbidJson();
         try
         {
             var patient = await _context.Patients.FirstOrDefaultAsync(p => p.PatientId == patientId);
