@@ -64,10 +64,15 @@ public class DoctorsController : ControllerBase
             var roleCount = await _context.Roles.CountAsync();
             if (roleCount == 0)
             {
+                // Đúng theo bảng roles thật + quy ước dùng xuyên suốt codebase (AuthController.Register,
+                // AccessControl.IsStaff kiểm tra role_id=="3"...): 1=Admin, 2=Doctor, 3=Patient. Trước đây
+                // bị đảo ngược (1=Patient, 3=Admin) — chỉ gây sai LỆCH TÊN hiển thị nếu bảng roles từng
+                // trống khi endpoint này chạy trước AuthController, không ảnh hưởng phân quyền (mọi kiểm
+                // tra quyền đều dựa vào role_id số, không phải RoleName).
                 _context.Roles.AddRange(
-                    new Role { RoleId = 1, RoleName = "Patient", Description = "Bệnh nhân" },
+                    new Role { RoleId = 1, RoleName = "Admin", Description = "Quản trị viên" },
                     new Role { RoleId = 2, RoleName = "Doctor", Description = "Bác sĩ" },
-                    new Role { RoleId = 3, RoleName = "Admin", Description = "Quản trị viên" }
+                    new Role { RoleId = 3, RoleName = "Patient", Description = "Bệnh nhân" }
                 );
                 await _context.SaveChangesAsync();
             }

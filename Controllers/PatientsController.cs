@@ -127,6 +127,12 @@ public class PatientsController : ControllerBase
             var p = await _context.Patients.FirstOrDefaultAsync(x => x.PatientId == id);
             if (p == null) return NotFound(new { success = false, message = "Không tìm thấy bệnh nhân." });
 
+            // dto.CccdNumber là string non-nullable trong C# nhưng client vẫn có thể gửi JSON "null" —
+            // System.Text.Json vẫn gán được null vào đó, gây NullReferenceException ở dto.CccdNumber.Length
+            // bên dưới nếu không chặn sớm.
+            if (string.IsNullOrWhiteSpace(dto.CccdNumber))
+                return BadRequest(new { success = false, message = "Vui lòng nhập số CCCD." });
+
             Guid? currentUserId = GetCurrentUserId();
             if (!currentUserId.HasValue)
             {
@@ -230,8 +236,12 @@ public class PatientsController : ControllerBase
                 return BadRequest(new { success = false, message = "Mã QR thiếu thông tin liên kết hợp lệ." });
             }
 
-            int ownerIdToCheck = dto.OwnerPatientId > 0 ? dto.OwnerPatientId : 2;
-            if (!await AccessControl.CanAccessPatientAsync(User, _context, ownerIdToCheck)) return this.ForbidJson();
+            // Không fallback về patient_id=2 nếu client thiếu OwnerPatientId — trước đây làm vậy sẽ
+            // âm thầm gắn hồ sơ người thân QR vào TÀI KHOẢN CỦA NGƯỜI KHÁC (bất kỳ ai cũng có thể để
+            // trống trường này và thêm được "người thân" vào hồ sơ bệnh nhân #2).
+            if (dto.OwnerPatientId <= 0)
+                return BadRequest(new { success = false, message = "Thiếu OwnerPatientId hợp lệ." });
+            if (!await AccessControl.CanAccessPatientAsync(User, _context, dto.OwnerPatientId)) return this.ForbidJson();
 
             int targetId = 0;
             string cleanId = dto.PatientId.Replace("#", "").Replace("F", "").Replace("P", "");
@@ -244,7 +254,7 @@ public class PatientsController : ControllerBase
             // duyệt CCCD thật như mọi hồ sơ người thân khác (FamilyMembersController.VerifyFamilyMember).
             var newMember = new FamilyMember
             {
-                OwnerPatientId = dto.OwnerPatientId > 0 ? dto.OwnerPatientId : 2,
+                OwnerPatientId = dto.OwnerPatientId,
                 FullName = $"BỆNH NHÂN QR #{dto.PatientId}".ToUpper(),
                 Relationship = "Người thân (QR)",
                 Gender = "Nam",

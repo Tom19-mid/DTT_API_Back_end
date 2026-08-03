@@ -332,7 +332,13 @@ public class InvoicesController : ControllerBase
             int targetPatientId;
             if (existingPatient != null)
             {
+                // DB có trigger trg_create_profile_on_user_insert tự tạo sẵn 1 dòng patients rỗng
+                // (phone_number NULL) ngay khi tạo users mới — nhánh update này trước đây quên gán lại
+                // PhoneNumber, nên bệnh nhân vãng lai luôn có users.phone_number đúng nhưng
+                // patients.phone_number NULL vĩnh viễn (lộ ra ở màn "Lịch Sử Hồ Sơ Bệnh Án" — cột SĐT
+                // trống dù đăng ký có nhập số điện thoại).
                 existingPatient.FullName = dto.FullName;
+                existingPatient.PhoneNumber = dto.Phone;
                 existingPatient.CccdNumber = dto.CccdNumber;
                 if (!string.IsNullOrEmpty(dto.BhytNumber)) existingPatient.HealthInsuranceNumber = dto.BhytNumber;
                 existingPatient.VerificationStatus = "verified";

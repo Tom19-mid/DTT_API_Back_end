@@ -456,6 +456,13 @@ public class MedicalRecordsController : ControllerBase
         // Chỉ Bác sĩ/nhân viên mới được tạo hồ sơ khám bệnh — hành động này thật sự trừ tồn kho
         // thuốc và tạo hóa đơn, bệnh nhân không được tự bịa hồ sơ khám cho bất kỳ ai.
         if (!AccessControl.IsStaff(User)) return this.ForbidJson();
+        // Trước đây DoctorId/MedicineId không hợp lệ (<=0, vd do TokenVault.DoctorId chưa kịp nạp) bị âm
+        // thầm thay bằng "#1" thay vì báo lỗi — hồ sơ khám/đơn thuốc có thể bị gắn nhầm cho bác sĩ/thuốc
+        // hoàn toàn khác, và trừ tồn kho nhầm thuốc #1 thay vì thuốc bác sĩ thực sự kê.
+        if (dto.DoctorId <= 0)
+            return BadRequest(new { success = false, message = "Thiếu thông tin bác sĩ khám (DoctorId không hợp lệ)." });
+        if (dto.Prescriptions != null && dto.Prescriptions.Any(p => p.MedicineId <= 0))
+            return BadRequest(new { success = false, message = "Có thuốc trong đơn thiếu MedicineId hợp lệ." });
         try
         {
             // 1. Tái sử dụng phiếu khám Draft đã tạo sẵn (vd: do đã chỉ định CLS qua
@@ -465,7 +472,7 @@ public class MedicalRecordsController : ControllerBase
             if (record == null) record = new MedicalRecord { AppointmentId = dto.AppointmentId, CreatedAt = DateTime.UtcNow };
 
             record.PatientId = dto.PatientId;
-            record.DoctorId = dto.DoctorId > 0 ? dto.DoctorId : 1;
+            record.DoctorId = dto.DoctorId;
             record.Symptoms = dto.Symptoms;
             record.Diagnosis = dto.Diagnosis;
             record.IcdCode = dto.IcdCode;
@@ -516,7 +523,7 @@ public class MedicalRecordsController : ControllerBase
                     var detail = new PrescriptionDetail
                     {
                         PrescriptionId = prescription.PrescriptionId,
-                        MedicineId = drug.MedicineId > 0 ? drug.MedicineId : 1,
+                        MedicineId = drug.MedicineId,
                         MedicineNameSnapshot = drug.MedicineName,
                         UnitSnapshot = drug.Unit,
                         Quantity = drug.Quantity,

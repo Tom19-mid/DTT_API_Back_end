@@ -44,13 +44,21 @@ public class AppointmentsController : ControllerBase
                 await _context.SaveChangesAsync();
             }
 
-            // 2. Validate patient exists or fallback to first patient
+            // 2. Xác thực bệnh nhân tồn tại — KHÔNG fallback về "bệnh nhân đầu tiên trong DB" nếu sai ID.
+            // Bệnh nhân tự đặt lịch cho chính mình đã bị chặn ở bước AccessControl phía trên nếu ID sai,
+            // nhưng nhân viên y tế (Lễ Tân...) gọi thay cho bệnh nhân thì không bị chặn ở đó — trước đây
+            // nếu Lễ Tân gửi nhầm/rỗng PatientId, hệ thống âm thầm gán lịch hẹn cho "bệnh nhân đầu tiên"
+            // hoàn toàn không liên quan thay vì báo lỗi.
             var patient = await _context.Patients.FirstOrDefaultAsync(p => p.PatientId == dto.PatientId);
-            int validPatientId = patient?.PatientId ?? (await _context.Patients.FirstOrDefaultAsync())?.PatientId ?? 1;
+            if (patient == null)
+                return BadRequest(new { success = false, message = $"Không tìm thấy bệnh nhân với PatientId={dto.PatientId}." });
+            int validPatientId = patient.PatientId;
 
-            // 3. Validate doctor exists or fallback to first doctor
+            // 3. Xác thực bác sĩ tồn tại — tương tự, không fallback về "bác sĩ đầu tiên" nếu sai ID.
             var doctor = await _context.Doctors.FirstOrDefaultAsync(d => d.DoctorId == dto.DoctorId);
-            int validDoctorId = doctor?.DoctorId ?? (await _context.Doctors.FirstOrDefaultAsync())?.DoctorId ?? 1;
+            if (doctor == null)
+                return BadRequest(new { success = false, message = $"Không tìm thấy bác sĩ với DoctorId={dto.DoctorId}." });
+            int validDoctorId = doctor.DoctorId;
 
             // 4. Safely query or create a valid slot_id in PostgreSQL doctor_schedule_slots table
             int slotId = 0;
@@ -135,7 +143,12 @@ public class AppointmentsController : ControllerBase
                     Console.WriteLine("Fallback slot creation failed: " + e2.Message);
                 }
             }
-            if (slotId <= 0) slotId = 1;
+            // Không còn fallback cứng slotId=1 — slot #1 có thể thuộc lịch của bác sĩ khác hoàn toàn,
+            // gán bừa vào đó sẽ làm sai lệch dữ liệu lịch hẹn (hiện đúng bác sĩ nhưng sai giờ/slot thật).
+            // Nếu cả tra cứu lẫn tự tạo slot mới đều thất bại, báo lỗi để Lễ Tân/bệnh nhân thử lại thay
+            // vì âm thầm tạo lịch hẹn với slot sai.
+            if (slotId <= 0)
+                return StatusCode(500, new { success = false, message = "Không thể tạo khung giờ khám cho bác sĩ này. Vui lòng thử lại hoặc chọn bác sĩ/giờ khác." });
 
             // Parse ngày hẹn từ dto.Date (format d/M/yyyy hoặc yyyy-MM-dd)
             DateOnly? apptDate = null;
@@ -230,26 +243,11 @@ public class AppointmentsController : ControllerBase
         }
         catch (Exception ex)
         {
+            // Trước đây báo "thành công" giả (AppointmentId=1, Status=Confirmed cứng) ngay cả khi có lỗi
+            // thật xảy ra — bệnh nhân tưởng đặt lịch xong trong khi KHÔNG có gì được lưu vào DB. Phải báo
+            // lỗi thật để app hiện đúng thông báo và bệnh nhân biết cần thử lại.
             Console.WriteLine("Fatal error in CreateAppointment: " + ex.Message);
-            return Ok(new AppointmentResponseDto
-            {
-                AppointmentId = 1,
-                PatientId = dto.PatientId > 0 ? dto.PatientId : 1,
-                PatientName = $"Bệnh nhân #{(dto.PatientId > 0 ? dto.PatientId : 1)}",
-                PatientGender = "Nam",
-                PatientAge = 35,
-                Reason = dto.Reason,
-                DoctorId = dto.DoctorId > 0 ? dto.DoctorId : 1,
-                DoctorName = dto.DoctorName ?? "BS. CK1 Nguyễn Văn A",
-                SpecialtyName = dto.SpecialtyName ?? "Nội tổng quát",
-                Date = dto.Date ?? DateTime.Now.ToString("dd/MM/yyyy"),
-                TimeSlot = dto.TimeSlot ?? "08:30 - 09:30",
-                Status = "Confirmed",
-                QueueNumber = 1,
-                ClinicRoom = "Phòng 101",
-                Fee = dto.Fee ?? "250.000đ",
-                CreatedAt = DateTime.UtcNow
-            });
+            return StatusCode(500, new { success = false, message = "Không thể đặt lịch khám do lỗi hệ thống. Vui lòng thử lại." });
         }
     }
 

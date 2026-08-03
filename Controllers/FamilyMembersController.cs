@@ -206,6 +206,12 @@ public class FamilyMembersController : ControllerBase
             var member = await _context.FamilyMembers.FirstOrDefaultAsync(m => m.MemberId == id);
             if (member == null) return NotFound(new { success = false, message = "Không tìm thấy hồ sơ người thân." });
 
+            // dto.CccdNumber là string non-nullable trong C# nhưng client vẫn có thể gửi JSON "null" —
+            // System.Text.Json vẫn gán được null vào đó, gây NullReferenceException ở dto.CccdNumber.Length
+            // bên dưới nếu không chặn sớm.
+            if (string.IsNullOrWhiteSpace(dto.CccdNumber))
+                return BadRequest(new { success = false, message = "Vui lòng nhập số CCCD." });
+
             var receptionistUser = await _context.Users.FirstOrDefaultAsync(u => u.RoleId == 4 || u.Email == "letan.minhchau@gmail.com");
             Guid currentUserId = receptionistUser?.UserId ?? Guid.Parse("ddb25ca6-80c8-434d-a05a-d4231c25e95b");
 
