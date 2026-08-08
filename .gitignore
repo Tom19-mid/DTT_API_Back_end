@@ -435,5 +435,5 @@ appsettings.json
 # file md
 API_DOCUMENTATION.md
 PasswordHashGenerator.cs
-.agents/AGENTS.md
+.agents/
 USERS_API_GUIDE.md
