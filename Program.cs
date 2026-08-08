@@ -3,6 +3,7 @@ using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.IdentityModel.Tokens;
+using Microsoft.OpenApi.Models;
 using DTT_Backend_API.Data;
 using DTT_Backend_API.Services;
 
@@ -11,7 +12,45 @@ var builder = WebApplication.CreateBuilder(args);
 // Add Services
 builder.Services.AddControllers();
 builder.Services.AddEndpointsApiExplorer();
-builder.Services.AddOpenApi(); // Built-in OpenAPI in .NET 9
+builder.Services.AddSwaggerGen(options =>
+{
+    options.SwaggerDoc("v1", new OpenApiInfo
+    {
+        Title = "DTT Healthcare API",
+        Version = "v1",
+        Description = "Hệ thống API quản lý phòng khám & đặt lịch khám bệnh DTT Healthcare"
+    });
+
+    
+    // Cấu hình nút "Authorize" để test API dùng Token JWT
+    options.AddSecurityDefinition("Bearer", new OpenApiSecurityScheme
+    {
+        Name = "Authorization",
+        Type = SecuritySchemeType.Http,
+        Scheme = "bearer",
+        BearerFormat = "JWT",
+        In = ParameterLocation.Header,
+        Description = "Dán trực tiếp chuỗi token JWT của bạn vào đây"
+    });
+
+    options.AddSecurityRequirement(new OpenApiSecurityRequirement
+    {
+        {
+            new OpenApiSecurityScheme
+            {
+                Reference = new OpenApiReference
+                {
+                    Type = ReferenceType.SecurityScheme,
+                    Id = "Bearer"
+                }
+            },
+            Array.Empty<string>()
+        }
+    });
+});
+
+/* Khi dùng Swagger thì không dùng AddOpenApi() */
+//builder.Services.AddOpenApi(); // Built-in OpenAPI in .NET 9 (Đã comment để dùng Swashbuckle 7.0 tránh xung đột)
 
 // PostgreSQL DbContext
 var connString = builder.Configuration.GetConnectionString("DefaultConnection");
@@ -86,6 +125,13 @@ builder.Services.AddCors(options =>
 });
 
 var app = builder.Build();
+app.UseSwagger();
+app.UseSwaggerUI(c =>
+{
+    c.SwaggerEndpoint("/swagger/v1/swagger.json", "DTT Healthcare API v1");
+    c.RoutePrefix = "swagger"; // Đường dẫn truy cập sẽ là /swagger
+});
+
 
 // ── Auto-seed bắt buộc: Đảm bảo status_id=7 'CheckedIn' luôn tồn tại trong DB ──
 using (var scope = app.Services.CreateScope())
@@ -113,7 +159,8 @@ app.UseCors("AllowAll");
 Directory.CreateDirectory(Path.Combine(app.Environment.ContentRootPath, "wwwroot", "uploads"));
 app.UseStaticFiles();
 
-app.MapOpenApi();
+/* Khi dùng Swagger thì không dùng app.MapOpenApi */
+//app.MapOpenApi(); // Built-in OpenAPI in .NET 9 (Đã comment để dùng Swashbuckle 7.0 tránh xung đột)
 
 app.UseAuthentication();
 app.UseAuthorization();

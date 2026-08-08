@@ -432,3 +432,8 @@ FodyWeavers.xsd
 # It was previously committed (and pushed to a PUBLIC repo) by mistake; untracked going forward.
 # See appsettings.json.example for the expected shape with placeholder values.
 appsettings.json
+# file md
+API_DOCUMENTATION.md
+PasswordHashGenerator.cs
+.agents/AGENTS.md
+USERS_API_GUIDE.md

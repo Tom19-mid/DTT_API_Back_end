@@ -32,6 +32,34 @@ public class RegisterRequestDto
     public string Password { get; set; } = string.Empty;
 }
 
+public class SendOtpDto
+{
+    [Required(ErrorMessage = "Vui lòng nhập số điện thoại")]
+    public string Phone { get; set; } = string.Empty;
+}
+
+public class VerifyOtpDto
+{
+    [Required(ErrorMessage = "Vui lòng nhập số điện thoại")]
+    public string Phone { get; set; } = string.Empty;
+
+    [Required(ErrorMessage = "Vui lòng nhập mã OTP")]
+    public string OtpCode { get; set; } = string.Empty;
+}
+
+public class ResetPasswordDto
+{
+    [Required(ErrorMessage = "Vui lòng nhập số điện thoại")]
+    public string Phone { get; set; } = string.Empty;
+
+    [Required(ErrorMessage = "Vui lòng nhập mã OTP")]
+    public string OtpCode { get; set; } = string.Empty;
+
+    [Required(ErrorMessage = "Vui lòng nhập mật khẩu mới")]
+    [MinLength(6, ErrorMessage = "Mật khẩu mới phải có ít nhất 6 ký tự")]
+    public string NewPassword { get; set; } = string.Empty;
+}
+
 public class AuthResponseDto
 {
     public string Token { get; set; } = string.Empty;
@@ -57,6 +85,18 @@ public class DoctorAuthResponseDto
     public string ClinicRoom { get; set; } = string.Empty;
     public int SpecialtyId { get; set; }
     public string SpecialtyName { get; set; } = string.Empty;
+    public string Phone { get; set; } = string.Empty;
+    public string Email { get; set; } = string.Empty;
+}
+
+public class AdminAuthResponseDto
+{
+    public string Token { get; set; } = string.Empty;
+    public Guid UserId { get; set; }
+    public int RoleId { get; set; } = 1;
+    public string RoleCode { get; set; } = "ADMIN";
+    public string RoleName { get; set; } = "Quản trị viên";
+    public string FullName { get; set; } = string.Empty;
     public string Phone { get; set; } = string.Empty;
     public string Email { get; set; } = string.Empty;
 }

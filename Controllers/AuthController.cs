@@ -38,6 +38,18 @@ public class AuthController : ControllerBase
             return Unauthorized(new { message = "Số điện thoại hoặc mật khẩu không chính xác." });
         }
 
+        // ── Thêm kiểm tra trạng thái khóa tài khoản ──────────────────────────
+        // (Code cũ chưa kiểm tra user.Status)
+        // if (user == null) return Unauthorized(...);
+        if (user.Status == "Locked" || user.Status == "Đã khóa")
+        {
+            return Unauthorized(new { message = "Tài khoản của bạn đã bị khóa. Vui lòng liên hệ Quản trị viên." });
+        }
+        if (user.Status == "Inactive" || user.Status == "Ngưng hoạt động")
+        {
+            return Unauthorized(new { message = "Tài khoản của bạn đã ngưng hoạt động." });
+        }
+
         // Verify password with BCrypt — không còn fallback so khớp plaintext, tránh mở lại
         // đúng dạng lỗ hổng vừa gỡ (nếu password_hash không phải bcrypt hợp lệ, coi là sai).
         bool isValidPassword;
@@ -81,6 +93,18 @@ public class AuthController : ControllerBase
         if (user == null)
         {
             return Unauthorized(new { message = "Số điện thoại hoặc mật khẩu không chính xác." });
+        }
+
+        // ── Thêm kiểm tra trạng thái khóa tài khoản ──────────────────────────
+        // (Code cũ chưa kiểm tra user.Status)
+        // if (user == null) return Unauthorized(...);
+        if (user.Status == "Locked" || user.Status == "Đã khóa")
+        {
+            return Unauthorized(new { message = "Tài khoản của bạn đã bị khóa. Vui lòng liên hệ Quản trị viên." });
+        }
+        if (user.Status == "Inactive" || user.Status == "Ngưng hoạt động")
+        {
+            return Unauthorized(new { message = "Tài khoản của bạn đã ngưng hoạt động." });
         }
 
         bool isValidPassword;
@@ -147,6 +171,67 @@ public class AuthController : ControllerBase
             ClinicRoom = doctor?.ClinicRoom ?? "Quầy làm việc",
             SpecialtyId = doctor?.SpecialtyId ?? 1,
             SpecialtyName = specialty?.SpecialtyName ?? "Nội tổng quát",
+            Phone = user.PhoneNumber,
+            Email = user.Email
+        });
+    }
+
+    [AllowAnonymous]
+    [HttpPost("admin-login")]
+    public async Task<IActionResult> AdminLogin([FromBody] LoginRequestDto dto)
+    {
+        if (!ModelState.IsValid) return BadRequest(ModelState);
+
+        var user = await _context.Users.FirstOrDefaultAsync(u => u.PhoneNumber == dto.Phone);
+        if (user == null)
+        {
+            return Unauthorized(new { message = "Số điện thoại hoặc mật khẩu không chính xác." });
+        }
+
+        // ── Thêm kiểm tra trạng thái khóa tài khoản ──────────────────────────
+        // (Code cũ chưa kiểm tra user.Status)
+        // if (user == null) return Unauthorized(...);
+        if (user.Status == "Locked" || user.Status == "Đã khóa")
+        {
+            return Unauthorized(new { message = "Tài khoản của bạn đã bị khóa. Vui lòng liên hệ Quản trị viên." });
+        }
+        if (user.Status == "Inactive" || user.Status == "Ngưng hoạt động")
+        {
+            return Unauthorized(new { message = "Tài khoản của bạn đã ngưng hoạt động." });
+        }
+
+        bool isValidPassword;
+        try
+        {
+            isValidPassword = BCrypt.Net.BCrypt.Verify(dto.Password, user.PasswordHash);
+        }
+        catch
+        {
+            isValidPassword = false;
+        }
+
+        if (!isValidPassword)
+        {
+            return Unauthorized(new { message = "Số điện thoại hoặc mật khẩu không chính xác." });
+        }
+
+        if (user.RoleId != 1)
+        {
+            return Unauthorized(new { message = "Tài khoản không có quyền truy cập trang Quản trị (Admin)." });
+        }
+
+        var role = await _context.Roles.FirstOrDefaultAsync(r => r.RoleId == user.RoleId);
+        string roleCode = role?.RoleCode ?? "ADMIN";
+        string roleName = role?.RoleName ?? "Quản trị viên";
+
+        return Ok(new AdminAuthResponseDto
+        {
+            Token = GenerateJwtToken(user),
+            UserId = user.UserId,
+            RoleId = user.RoleId,
+            RoleCode = roleCode,
+            RoleName = roleName,
+            FullName = !string.IsNullOrWhiteSpace(user.FullName) ? user.FullName : "Admin",
             Phone = user.PhoneNumber,
             Email = user.Email
         });
@@ -283,6 +368,13 @@ public class AuthController : ControllerBase
         if (user == null)
             return NotFound(new { success = false, message = "Số điện thoại chưa được đăng ký trong hệ thống." });
 
+        // ── Thêm kiểm tra trạng thái khóa tài khoản khi gửi OTP ──────────────────
+        // (Code cũ chưa kiểm tra status khi gửi OTP)
+        if (user.Status == "Locked" || user.Status == "Đã khóa")
+            return BadRequest(new { success = false, message = "Tài khoản đã bị khóa, không thể gửi OTP." });
+        if (user.Status == "Inactive" || user.Status == "Ngưng hoạt động")
+            return BadRequest(new { success = false, message = "Tài khoản đã ngưng hoạt động, không thể gửi OTP." });
+
         // Generate 6-digit OTP
         var otp = new Random().Next(100000, 999999).ToString();
         _otpStore[dto.Phone] = (otp, DateTime.UtcNow.AddMinutes(5));
@@ -309,6 +401,11 @@ public class AuthController : ControllerBase
     [HttpPost("verify-otp")]
     public async Task<IActionResult> VerifyOtp([FromBody] VerifyOtpDto dto)
     {
+        // ── Cập nhật kiểm tra rút gọn (Code cũ bên dưới được comment lại) ────────
+        // if (string.IsNullOrWhiteSpace(dto.Phone) || string.IsNullOrWhiteSpace(dto.OtpCode))
+        //     return BadRequest(new { success = false, message = "Vui lòng nhập đầy đủ thông tin số điện thoại và mã OTP." });
+        // if (_otpStore.TryGetValue(dto.Phone, out var record)) { ... }
+
         if (!_otpStore.TryGetValue(dto.Phone, out var entry))
             return BadRequest(new { success = false, message = "Chưa có mã OTP cho số điện thoại này. Vui lòng gửi lại." });
 
@@ -318,7 +415,7 @@ public class AuthController : ControllerBase
             return BadRequest(new { success = false, message = "Mã OTP đã hết hạn. Vui lòng gửi lại mã mới." });
         }
 
-        if (entry.Code != dto.OtpCode)
+        if (entry.Code != dto.OtpCode?.Trim())
             return BadRequest(new { success = false, message = "Mã OTP không chính xác. Vui lòng kiểm tra lại." });
 
         // Update user status & patient verification status in database upon OTP confirmation
@@ -353,7 +450,7 @@ public class AuthController : ControllerBase
             return BadRequest(new { success = false, message = "Mã OTP đã hết hạn. Vui lòng gửi lại mã mới." });
         }
 
-        if (entry.Code != dto.OtpCode)
+        if (entry.Code != dto.OtpCode?.Trim())
             return BadRequest(new { success = false, message = "Mã OTP không chính xác." });
 
         // 2. Find user and reset password
