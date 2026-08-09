@@ -60,6 +60,24 @@ public class ResetPasswordDto
     public string NewPassword { get; set; } = string.Empty;
 }
 
+public class UpdateProfileDto
+{
+    public int PatientId { get; set; }
+    public string? FullName { get; set; }
+    public string? Email { get; set; }
+    public string? Gender { get; set; }
+    public string? Address { get; set; }
+    public string? HealthInsuranceNumber { get; set; }
+    public DateTime? DateOfBirth { get; set; }
+}
+
+public class ChangePasswordDto
+{
+    public string Phone { get; set; } = string.Empty;
+    public string CurrentPassword { get; set; } = string.Empty;
+    public string NewPassword { get; set; } = string.Empty;
+}
+
 public class AuthResponseDto
 {
     public string Token { get; set; } = string.Empty;
