@@ -185,7 +185,7 @@ public class PatientsController : ControllerBase
                     RecordType = "family_member",
                     FullName = m.FullName,
                     Relationship = m.Relationship ?? "Người thân",
-                    Dob = m.DateOfBirth.HasValue ? m.DateOfBirth.Value.ToString("dd/MM/yyyy") : "",
+                    Dob = m.DateOfBirth.HasValue ? m.DateOfBirth.GetValueOrDefault().ToString("dd/MM/yyyy") : "",
                     Gender = m.Gender ?? "",
                     Phone = !string.IsNullOrEmpty(m.PhoneNumber) ? m.PhoneNumber : (u != null ? u.PhoneNumber : ""),
                     Cccd = m.CccdNumber ?? "",
