@@ -12,6 +12,7 @@ public class AppDbContext : DbContext
     public DbSet<Patient> Patients => Set<Patient>();
     public DbSet<FamilyMember> FamilyMembers => Set<FamilyMember>();
     public DbSet<Doctor> Doctors => Set<Doctor>();
+    public DbSet<DoctorLeave> DoctorLeaves => Set<DoctorLeave>();
     public DbSet<Specialty> Specialties => Set<Specialty>();
     public DbSet<Icd10Catalog> Icd10Catalogs => Set<Icd10Catalog>();
     public DbSet<Appointment> Appointments => Set<Appointment>();

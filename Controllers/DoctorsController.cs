@@ -123,36 +123,477 @@ public class DoctorsController : ControllerBase
             await SeedDoctorSchedulesAsync();
         }
 
+        var specialtiesDict = await _context.Specialties.ToDictionaryAsync(s => s.SpecialtyId, s => s.SpecialtyName);
+        var userIds = await _context.Doctors.Select(d => d.UserId).Distinct().ToListAsync();
+        var usersDict = await _context.Users.Where(u => userIds.Contains(u.UserId)).ToDictionaryAsync(u => u.UserId);
+
         var query = _context.Doctors.AsQueryable();
         // Strictly include only real doctors (BS., Bác sĩ, ThS., TS.)
+        /* [OLD CODE COMMENTED OUT — bộ lọc lọc mất bác sĩ tạo mới không có tiền tố BS./Bác sĩ]
         query = query.Where(d => d.FullName != null && (d.FullName.Contains("BS.") || d.FullName.Contains("Bác sĩ") || d.FullName.Contains("ThS.") || d.FullName.Contains("TS.")));
+        */
 
         if (specialtyId.HasValue && specialtyId.Value > 0)
         {
             query = query.Where(d => d.SpecialtyId == specialtyId.Value);
         }
 
+        var allDoctorIds = await _context.Doctors.Select(d => d.DoctorId).ToListAsync();
+        var leavesList = await _context.DoctorLeaves
+            .Where(l => allDoctorIds.Contains(l.DoctorId))
+            .OrderByDescending(l => l.CreatedAt)
+            .ToListAsync();
+        var leavesDict = leavesList
+            .GroupBy(l => l.DoctorId)
+            .ToDictionary(g => g.Key, g => g.First());
+
         var doctors = await query.ToListAsync();
 
         var result = doctors.Select(d => {
             var master = doctorMasterList.FirstOrDefault(m => d.FullName != null && d.FullName.Contains(m.Name.Substring(m.Name.LastIndexOf(' ') + 1)));
+            usersDict.TryGetValue(d.UserId, out var u);
+            specialtiesDict.TryGetValue(d.SpecialtyId ?? 0, out var specName);
+            leavesDict.TryGetValue(d.DoctorId, out var leaveRecord);
+
+            string rawStatus = !string.IsNullOrEmpty(d.Status) ? d.Status : (u?.Status ?? "Active");
+            string formattedStatus = rawStatus switch
+            {
+                "Active" or "active" or "Đang hoạt động" => "Đang hoạt động",
+                "Inactive" or "inactive" or "Ngưng hoạt động" => "Ngưng hoạt động",
+                "Locked" or "locked" or "Đã khóa" => "Đã khóa",
+                "OnLeave" or "onleave" or "Nghỉ phép" => "Nghỉ phép",
+                _ => "Đang hoạt động"
+            };
+
             return new
             {
                 d.DoctorId,
+                id = d.DoctorId,
                 d.UserId,
                 d.SpecialtyId,
-                FullName = !string.IsNullOrEmpty(d.FullName) ? d.FullName : "BS. CKII Nguyễn Văn A",
+                SpecialtyName = specName ?? "Nội tổng quát",
+                specialty = specName ?? "Nội tổng quát",
+                FullName = !string.IsNullOrEmpty(d.FullName) ? d.FullName : (u?.FullName ?? "Bác sĩ DTT"),
                 Degree = !string.IsNullOrEmpty(d.Degree) ? d.Degree : "Chuyên khoa Bác sĩ",
                 d.ExperienceYears,
                 ClinicRoom = !string.IsNullOrEmpty(d.ClinicRoom) ? d.ClinicRoom : "Phòng 101",
                 d.Rating,
                 d.ReviewCount,
+                ratingAverage = d.Rating,
+                totalReviews = d.ReviewCount,
+                Phone = u?.PhoneNumber ?? "Chưa cập nhật",
+                Email = u?.Email ?? "Chưa cập nhật",
+                userEmail = u?.Email ?? "",
                 WorkingDaysText = master?.WorkingDays ?? "Thứ Hai đến Thứ Bảy",
-                d.Status
+                Status = formattedStatus,
+                Avatar = d.AvatarUrl ?? u?.AvatarUrl ?? "",
+                AvatarUrl = d.AvatarUrl ?? u?.AvatarUrl ?? "",
+                LeaveStartDate = leaveRecord != null ? leaveRecord.LeaveStartDate.ToString("dd/MM/yyyy") : null,
+                LeaveEndDate = leaveRecord != null ? leaveRecord.LeaveEndDate.ToString("dd/MM/yyyy") : null,
+                LeaveReason = leaveRecord?.Reason,
+                LeaveStatus = leaveRecord != null ? FormatLeaveStatusToVi(leaveRecord.Status) : null
             };
         }).ToList();
 
         return Ok(result);
+    }
+
+    // Helper chuẩn hóa trạng thái đơn nghỉ phép theo đúng CHECK CONSTRAINT ('Pending', 'Approved', 'Rejected', 'Cancelled')
+    private static string NormalizeLeaveStatus(string? rawStatus)
+    {
+        if (string.IsNullOrWhiteSpace(rawStatus)) return "Approved";
+        var s = rawStatus.Trim();
+        if (s == "Chờ duyệt" || s.Equals("pending", StringComparison.OrdinalIgnoreCase)) return "Pending";
+        if (s == "Đã duyệt" || s.Equals("approved", StringComparison.OrdinalIgnoreCase)) return "Approved";
+        if (s == "Từ chối" || s.Equals("rejected", StringComparison.OrdinalIgnoreCase)) return "Rejected";
+        if (s == "Đã hủy" || s.Equals("cancelled", StringComparison.OrdinalIgnoreCase)) return "Cancelled";
+        return "Approved";
+    }
+
+    private static string FormatLeaveStatusToVi(string? rawStatus)
+    {
+        if (string.IsNullOrWhiteSpace(rawStatus)) return "Đã duyệt";
+        var s = rawStatus.Trim();
+        if (s == "Pending" || s == "Chờ duyệt") return "Chờ duyệt";
+        if (s == "Approved" || s == "Đã duyệt") return "Đã duyệt";
+        if (s == "Rejected" || s == "Từ chối") return "Từ chối";
+        if (s == "Cancelled" || s == "Đã hủy") return "Đã hủy";
+        return "Đã duyệt";
+    }
+
+    private static DateOnly ParseDateOnlyDDMMYYYY(string? dateStr)
+    {
+        if (string.IsNullOrWhiteSpace(dateStr)) return DateOnly.FromDateTime(DateTime.Today);
+        var s = dateStr.Trim();
+        string[] formats = new[] { "dd/MM/yyyy", "d/M/yyyy", "yyyy-MM-dd" };
+        if (DateOnly.TryParseExact(s, formats, System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.None, out var parsed))
+        {
+            return parsed;
+        }
+        return DateOnly.FromDateTime(DateTime.Today);
+    }
+
+    // Helper chuẩn hóa trạng thái cho bảng users (chỉ chấp nhận Active / Inactive / Locked)
+    private static string NormalizeUserStatus(string? rawStatus)
+    {
+        if (string.IsNullOrWhiteSpace(rawStatus)) return "Active";
+        var s = rawStatus.Trim();
+        if (s == "Đang hoạt động" || s.Equals("active", StringComparison.OrdinalIgnoreCase))
+            return "Active";
+        if (s == "Đã khóa" || s.Equals("locked", StringComparison.OrdinalIgnoreCase))
+            return "Locked";
+        if (s == "Ngưng hoạt động" || s.Equals("inactive", StringComparison.OrdinalIgnoreCase))
+            return "Inactive";
+        if (s == "Nghỉ phép" || s.Equals("onleave", StringComparison.OrdinalIgnoreCase))
+            return "Inactive"; // Bảng users chỉ hỗ trợ Active, Inactive, Locked
+        return "Active";
+    }
+
+    // Helper chuẩn hóa trạng thái cho bảng doctors (Active / Inactive / Locked / OnLeave)
+    private static string NormalizeDoctorStatus(string? rawStatus)
+    {
+        if (string.IsNullOrWhiteSpace(rawStatus)) return "Active";
+        var s = rawStatus.Trim();
+        if (s == "Đang hoạt động" || s.Equals("active", StringComparison.OrdinalIgnoreCase))
+            return "Active";
+        if (s == "Đã khóa" || s.Equals("locked", StringComparison.OrdinalIgnoreCase))
+            return "Locked";
+        if (s == "Ngưng hoạt động" || s.Equals("inactive", StringComparison.OrdinalIgnoreCase))
+            return "Inactive";
+        if (s == "Nghỉ phép" || s.Equals("onleave", StringComparison.OrdinalIgnoreCase))
+            return "OnLeave";
+        return "Active";
+    }
+
+    // POST /api/doctors — Tạo mới Bác sĩ
+    [HttpPost]
+    public async Task<IActionResult> CreateDoctor([FromBody] DTT_Backend_API.DTOs.CreateDoctorDto dto)
+    {
+        if (!ModelState.IsValid) return BadRequest(ModelState);
+
+        try
+        {
+            if (!string.IsNullOrWhiteSpace(dto.Phone) && dto.Phone.Trim().Length > 10)
+            {
+                return BadRequest(new { message = "Số điện thoại không được vượt quá 10 chữ số." });
+            }
+
+            var phone = dto.Phone.Trim();
+            var existingUser = await _context.Users.AnyAsync(u => u.PhoneNumber == phone || (!string.IsNullOrEmpty(dto.Email) && u.Email == dto.Email));
+            if (existingUser)
+            {
+                return BadRequest(new { message = "Số điện thoại hoặc Email đã được sử dụng." });
+            }
+
+            string password = !string.IsNullOrWhiteSpace(dto.Password) ? dto.Password : "Doctor@123";
+            var hashedPassword = BCrypt.Net.BCrypt.HashPassword(password);
+            string normDocStatus = NormalizeDoctorStatus(dto.Status);
+            string normUserStatus = NormalizeUserStatus(dto.Status);
+
+            string? inputAvatar = !string.IsNullOrWhiteSpace(dto.AvatarUrl) ? dto.AvatarUrl : dto.Avatar;
+
+            var newUser = new User
+            {
+                UserId = Guid.NewGuid(),
+                PhoneNumber = phone,
+                Email = !string.IsNullOrWhiteSpace(dto.Email) ? dto.Email : $"{phone}@dtt.health",
+                PasswordHash = hashedPassword,
+                RoleId = 2, // Doctor
+                FullName = dto.FullName,
+                //Status = !string.IsNullOrWhiteSpace(dto.Status) ? dto.Status : "Active",
+                Status = normUserStatus,
+                AvatarUrl = inputAvatar,
+                CreatedAt = DateTime.UtcNow,
+                UpdatedAt = DateTime.UtcNow
+            };
+
+            _context.Users.Add(newUser);
+            await _context.SaveChangesAsync();
+
+            var newDoctor = new Doctor
+            {
+                UserId = newUser.UserId,
+                FullName = dto.FullName,
+                Degree = dto.Degree ?? "Bác sĩ Chuyên khoa",
+                ExperienceYears = dto.ExperienceYears,
+                ClinicRoom = dto.ClinicRoom ?? "Phòng 101",
+                SpecialtyId = dto.SpecialtyId > 0 ? dto.SpecialtyId : 1,
+                // Status = newUser.Status,
+                Status = normDocStatus,
+                AvatarUrl = inputAvatar,
+                Rating = 5.0m,
+                ReviewCount = 0
+            };
+
+            _context.Doctors.Add(newDoctor);
+            await _context.SaveChangesAsync();
+
+            if (normDocStatus == "OnLeave" || !string.IsNullOrWhiteSpace(dto.LeaveStartDate))
+            {
+                var startDate = ParseDateOnlyDDMMYYYY(dto.LeaveStartDate);
+                var endDate = ParseDateOnlyDDMMYYYY(dto.LeaveEndDate ?? dto.LeaveStartDate);
+                string dbLeaveStatus = NormalizeLeaveStatus(dto.LeaveStatus ?? "Approved");
+
+                var newLeave = new DoctorLeave
+                {
+                    DoctorId = newDoctor.DoctorId,
+                    LeaveStartDate = startDate,
+                    LeaveEndDate = endDate,
+                    Reason = dto.LeaveReason,
+                    Status = dbLeaveStatus,
+                    CreatedAt = DateTime.UtcNow,
+                    UpdatedAt = DateTime.UtcNow
+                };
+                _context.DoctorLeaves.Add(newLeave);
+                await _context.SaveChangesAsync();
+            }
+
+            string specName = "Nội tổng quát";
+            if (newDoctor.SpecialtyId.HasValue)
+            {
+                var spec = await _context.Specialties.FirstOrDefaultAsync(s => s.SpecialtyId == newDoctor.SpecialtyId.Value);
+                if (spec != null) specName = spec.SpecialtyName;
+            }
+
+            return Ok(new
+            {
+                success = true,
+                message = "Tạo tài khoản Bác sĩ mới thành công!",
+                doctor = new
+                {
+                    newDoctor.DoctorId,
+                    id = newDoctor.DoctorId,
+                    newDoctor.UserId,
+                    newDoctor.SpecialtyId,
+                    SpecialtyName = specName,
+                    specialty = specName,
+                    FullName = newDoctor.FullName,
+                    Degree = newDoctor.Degree,
+                    newDoctor.ExperienceYears,
+                    ClinicRoom = newDoctor.ClinicRoom,
+                    newDoctor.Rating,
+                    newDoctor.ReviewCount,
+                    Phone = newUser.PhoneNumber,
+                    Email = newUser.Email,
+                    Status = newDoctor.Status,
+                    Avatar = newDoctor.AvatarUrl ?? "",
+                    AvatarUrl = newDoctor.AvatarUrl ?? ""
+                }
+            });
+        }
+        catch (Exception ex)
+        {
+            return StatusCode(500, new { message = "Lỗi khi tạo tài khoản Bác sĩ mới.", error = ex.Message });
+        }
+    }
+
+    // PUT /api/doctors/{id} — Cập nhật thông tin Bác sĩ
+    [HttpPut("{id}")]
+    public async Task<IActionResult> UpdateDoctor(int id, [FromBody] DTT_Backend_API.DTOs.UpdateDoctorDto dto)
+    {
+        try
+        {
+            var doctor = await _context.Doctors.FirstOrDefaultAsync(d => d.DoctorId == id);
+            if (doctor == null)
+            {
+                return NotFound(new { message = "Không tìm thấy thông tin Bác sĩ." });
+            }
+
+            var user = await _context.Users.FirstOrDefaultAsync(u => u.UserId == doctor.UserId);
+            if (user == null && doctor.UserId == Guid.Empty)
+            {
+                user = await _context.Users.FirstOrDefaultAsync(u => u.FullName != null && u.FullName == doctor.FullName);
+            }
+
+            string? inputAvatar = dto.AvatarUrl ?? dto.Avatar;
+            if (inputAvatar != null)
+            {
+                doctor.AvatarUrl = inputAvatar;
+                if (user != null) user.AvatarUrl = inputAvatar;
+            }
+
+            if (!string.IsNullOrWhiteSpace(dto.FullName))
+            {
+                doctor.FullName = dto.FullName;
+                if (user != null) user.FullName = dto.FullName;
+            }
+
+            if (!string.IsNullOrWhiteSpace(dto.Degree)) doctor.Degree = dto.Degree;
+            if (dto.ExperienceYears.HasValue) doctor.ExperienceYears = dto.ExperienceYears.Value;
+            if (!string.IsNullOrWhiteSpace(dto.ClinicRoom)) doctor.ClinicRoom = dto.ClinicRoom;
+            if (dto.SpecialtyId.HasValue && dto.SpecialtyId.Value > 0) doctor.SpecialtyId = dto.SpecialtyId.Value;
+
+            if (!string.IsNullOrWhiteSpace(dto.Status))
+            {
+                // doctor.Status = dto.Status;
+                // if (user != null) user.Status = dto.Status;
+                string normDocStatus = NormalizeDoctorStatus(dto.Status);
+                string normUserStatus = NormalizeUserStatus(dto.Status);
+                doctor.Status = normDocStatus;
+                if (user != null) user.Status = normUserStatus;
+            }
+
+            if (user != null)
+            {
+                if (!string.IsNullOrWhiteSpace(dto.Phone) && dto.Phone != user.PhoneNumber)
+                {
+                    bool phoneExists = await _context.Users.AnyAsync(u => u.PhoneNumber == dto.Phone && u.UserId != user.UserId);
+                    if (phoneExists)
+                    {
+                        return BadRequest(new { message = "Số điện thoại đã được sử dụng bởi tài khoản khác." });
+                    }
+                    user.PhoneNumber = dto.Phone;
+                }
+
+                if (!string.IsNullOrWhiteSpace(dto.Email) && dto.Email != user.Email)
+                {
+                    bool emailExists = await _context.Users.AnyAsync(u => u.Email == dto.Email && u.UserId != user.UserId);
+                    if (emailExists)
+                    {
+                        return BadRequest(new { message = "Email đã được sử dụng bởi tài khoản khác." });
+                    }
+                    user.Email = dto.Email;
+                }
+
+                user.UpdatedAt = DateTime.UtcNow;
+            }
+
+            if (doctor.Status == "OnLeave" || !string.IsNullOrWhiteSpace(dto.LeaveStartDate))
+            {
+                var startDate = ParseDateOnlyDDMMYYYY(dto.LeaveStartDate);
+                var endDate = ParseDateOnlyDDMMYYYY(dto.LeaveEndDate ?? dto.LeaveStartDate);
+                
+                // Mặc định đơn mới tạo luôn ở trạng thái Pending (Chờ duyệt) trừ khi được ghi rõ Approved
+                string dbLeaveStatus = "Pending";
+                if (!string.IsNullOrWhiteSpace(dto.LeaveStatus) && (dto.LeaveStatus.Equals("Approved", StringComparison.OrdinalIgnoreCase) || dto.LeaveStatus == "Đã duyệt"))
+                {
+                    dbLeaveStatus = "Approved";
+                }
+
+                // Luôn tạo mới đơn nghỉ phép (mã đơn mới) mỗi lần đăng ký nghỉ phép
+                var newLeave = new DoctorLeave
+                {
+                    DoctorId = doctor.DoctorId,
+                    LeaveStartDate = startDate,
+                    LeaveEndDate = endDate,
+                    Reason = dto.LeaveReason,
+                    Status = dbLeaveStatus,
+                    CreatedAt = DateTime.UtcNow,
+                    UpdatedAt = DateTime.UtcNow,
+                    ApprovedAt = dbLeaveStatus == "Approved" ? DateTime.UtcNow : null
+                };
+                _context.DoctorLeaves.Add(newLeave);
+
+                if (dbLeaveStatus == "Approved")
+                {
+                    // Cập nhật trạng thái các ca làm việc trùng lịch sang 'Off' (giữ nguyên dữ liệu trong CSDL)
+                    try
+                    {
+                        var conn = _context.Database.GetDbConnection();
+                        if (conn.State != ConnectionState.Open) await conn.OpenAsync();
+                        using var updCmd = conn.CreateCommand();
+                        updCmd.CommandText = @"
+                            UPDATE doctor_schedule_slots 
+                            SET status = 'Off'
+                            WHERE schedule_id IN (
+                                SELECT schedule_id FROM doctor_schedules 
+                                WHERE doctor_id = @docId AND work_date BETWEEN @sDate AND @eDate
+                            );
+                            UPDATE doctor_schedules 
+                            SET status = 'Off'
+                            WHERE doctor_id = @docId AND work_date BETWEEN @sDate AND @eDate;
+                        ";
+                        var p1 = updCmd.CreateParameter(); p1.ParameterName = "@docId"; p1.Value = doctor.DoctorId; updCmd.Parameters.Add(p1);
+                        var p2 = updCmd.CreateParameter(); p2.ParameterName = "@sDate"; p2.Value = startDate.ToDateTime(TimeOnly.MinValue); updCmd.Parameters.Add(p2);
+                        var p3 = updCmd.CreateParameter(); p3.ParameterName = "@eDate"; p3.Value = endDate.ToDateTime(TimeOnly.MinValue); updCmd.Parameters.Add(p3);
+                        await updCmd.ExecuteNonQueryAsync();
+                    }
+                    catch (Exception schedEx)
+                    {
+                        Console.WriteLine($"[UpdateDoctor Warning] Không thể cập nhật status doctor_schedules: {schedEx.Message}");
+                    }
+                }
+            }
+
+            await _context.SaveChangesAsync();
+
+            string specName = "Nội tổng quát";
+            if (doctor.SpecialtyId.HasValue)
+            {
+                var spec = await _context.Specialties.FirstOrDefaultAsync(s => s.SpecialtyId == doctor.SpecialtyId.Value);
+                if (spec != null) specName = spec.SpecialtyName;
+            }
+
+            return Ok(new
+            {
+                success = true,
+                message = "Cập nhật thông tin Bác sĩ thành công!",
+                doctor = new
+                {
+                    doctor.DoctorId,
+                    id = doctor.DoctorId,
+                    doctor.UserId,
+                    doctor.SpecialtyId,
+                    SpecialtyName = specName,
+                    specialty = specName,
+                    FullName = doctor.FullName,
+                    Degree = doctor.Degree,
+                    doctor.ExperienceYears,
+                    ClinicRoom = doctor.ClinicRoom,
+                    doctor.Rating,
+                    doctor.ReviewCount,
+                    Phone = user?.PhoneNumber ?? "Chưa cập nhật",
+                    Email = user?.Email ?? "Chưa cập nhật",
+                    Status = doctor.Status,
+                    Avatar = doctor.AvatarUrl ?? "",
+                    AvatarUrl = doctor.AvatarUrl ?? ""
+                }
+            });
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[UpdateDoctor Error]: {ex.Message} | Inner: {ex.InnerException?.Message}");
+            return StatusCode(500, new { message = $"Lỗi khi cập nhật thông tin Bác sĩ: {ex.InnerException?.Message ?? ex.Message}", error = ex.Message });
+        }
+    }
+
+    // PUT /api/doctors/{id}/status — Cập nhật trạng thái/Khóa Bác sĩ
+    [HttpPut("{id}/status")]
+    public async Task<IActionResult> UpdateDoctorStatus(int id, [FromBody] DTT_Backend_API.DTOs.UpdateDoctorStatusDto dto)
+    {
+        try
+        {
+            var doctor = await _context.Doctors.FirstOrDefaultAsync(d => d.DoctorId == id);
+            if (doctor == null)
+            {
+                return NotFound(new { message = "Không tìm thấy Bác sĩ." });
+            }
+
+            string normDocStatus = NormalizeDoctorStatus(dto.Status);
+            string normUserStatus = NormalizeUserStatus(dto.Status);
+            doctor.Status = normDocStatus;
+            var user = await _context.Users.FirstOrDefaultAsync(u => u.UserId == doctor.UserId);
+            if (user != null)
+            {
+                // user.Status = dto.Status;
+
+                user.Status = normUserStatus;
+                user.UpdatedAt = DateTime.UtcNow;
+            }
+
+            await _context.SaveChangesAsync();
+
+            return Ok(new
+            {
+                success = true,
+                message = "Cập nhật trạng thái Bác sĩ thành công!",
+                status = doctor.Status
+            });
+        }
+        catch (Exception ex)
+        {
+            return StatusCode(500, new { message = "Lỗi khi cập nhật trạng thái Bác sĩ.", error = ex.Message });
+        }
     }
 
     private static bool _schedulesSeeded = false;
@@ -166,9 +607,12 @@ public class DoctorsController : ControllerBase
             _schedulesSeeded = true;
         }
 
+        /* [OLD CODE COMMENTED OUT — bộ lọc lọc mất bác sĩ tạo mới không có tiền tố BS./Bác sĩ]
         var doctors = await _context.Doctors
             .Where(d => d.FullName != null && (d.FullName.Contains("BS.") || d.FullName.Contains("Bác sĩ") || d.FullName.Contains("ThS.") || d.FullName.Contains("TS.")))
             .ToListAsync();
+        */
+        var doctors = await _context.Doctors.ToListAsync();
 
         if (doctorId.HasValue && doctorId.Value > 0)
         {
@@ -329,6 +773,10 @@ public class DoctorsController : ControllerBase
                             SELECT @docId, @workDate, '08:00:00'::time, '17:00:00'::time, 'Available'
                             WHERE NOT EXISTS (
                                 SELECT 1 FROM doctor_schedules WHERE doctor_id = @docId AND work_date = @workDate
+                            )
+                            AND NOT EXISTS (
+                                SELECT 1 FROM doctor_leaves 
+                                WHERE doctor_id = @docId AND status = 'Approved' AND @workDate BETWEEN leave_start_date AND leave_end_date
                             )";
                         
                         var p1 = insCmd.CreateParameter(); p1.ParameterName = "@docId"; p1.Value = doc.DoctorId; insCmd.Parameters.Add(p1);

@@ -9,6 +9,9 @@ using DTT_Backend_API.Services;
 
 var builder = WebApplication.CreateBuilder(args);
 
+// Bật hỗ trợ lưu Utc DateTime vào cột timestamp without time zone của PostgreSQL
+AppContext.SetSwitch("Npgsql.EnableLegacyTimestampBehavior", true);
+
 // Add Services
 builder.Services.AddControllers();
 builder.Services.AddEndpointsApiExplorer();

@@ -224,6 +224,30 @@ public class UsersController : ControllerBase
                 }
                 await _context.SaveChangesAsync();
             }
+            else if (newUser.RoleId == 2)
+            {
+                var d = await _context.Doctors.FirstOrDefaultAsync(x => x.UserId == newUser.UserId);
+                if (d != null)
+                {
+                    d.FullName = dto.FullName;
+                }
+                else
+                {
+                    _context.Doctors.Add(new Doctor
+                    {
+                        UserId = newUser.UserId,
+                        FullName = dto.FullName,
+                        Degree = "Bác sĩ Chuyên khoa",
+                        ExperienceYears = 5,
+                        ClinicRoom = "Phòng 101",
+                        SpecialtyId = 1,
+                        Status = newUser.Status ?? "Active",
+                        Rating = 5.0m,
+                        ReviewCount = 0
+                    });
+                }
+                await _context.SaveChangesAsync();
+            }
 
             var role = await _context.Roles.FirstOrDefaultAsync(r => r.RoleId == newUser.RoleId);
 

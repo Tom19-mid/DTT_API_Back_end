@@ -292,6 +292,43 @@ public class Doctor
     public string Status { get; set; } = "Active";
 }
 
+[Table("doctor_leaves")]
+public class DoctorLeave
+{
+    [Key]
+    [DatabaseGenerated(DatabaseGeneratedOption.Identity)]
+    [Column("leave_id")]
+    public int LeaveId { get; set; }
+
+    [Column("doctor_id")]
+    public int DoctorId { get; set; }
+
+    [Column("leave_start_date")]
+    public DateOnly LeaveStartDate { get; set; }
+
+    [Column("leave_end_date")]
+    public DateOnly LeaveEndDate { get; set; }
+
+    [Column("reason")]
+    public string? Reason { get; set; }
+
+    [Column("status")]
+    [StringLength(20)]
+    public string Status { get; set; } = "Pending";
+
+    [Column("created_at")]
+    public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
+
+    [Column("updated_at")]
+    public DateTime UpdatedAt { get; set; } = DateTime.UtcNow;
+
+    [Column("approved_at")]
+    public DateTime? ApprovedAt { get; set; }
+
+    [Column("approved_by")]
+    public Guid? ApprovedBy { get; set; }
+}
+
 [Table("appointments")]
 public class Appointment
 {
