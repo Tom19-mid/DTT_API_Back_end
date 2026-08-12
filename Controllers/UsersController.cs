@@ -260,7 +260,7 @@ public class UsersController : ControllerBase
                 RoleCode = role?.RoleCode ?? "USER",
                 RoleName = role?.RoleName ?? "Người dùng",
                 FullName = newUser.FullName ?? dto.FullName,
-                Status = newUser.Status,
+                Status = newUser.Status ?? "Chưa có trạng thái",
                 CreatedAt = newUser.CreatedAt,
                 UpdatedAt = newUser.UpdatedAt
             });
