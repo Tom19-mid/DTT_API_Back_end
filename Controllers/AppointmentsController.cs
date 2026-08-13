@@ -27,6 +27,9 @@ public class AppointmentsController : ControllerBase
 
         try
         {
+            // 0. Sync PostgreSQL sequence for appointments_appointment_id_seq
+            await SyncSequencesAsync();
+
             // 1. Ensure appointment_statuses table has entries
             var statusCount = await _context.AppointmentStatuses.CountAsync();
             if (statusCount == 0)
@@ -324,6 +327,177 @@ public class AppointmentsController : ControllerBase
         }
     }
 
+    [HttpGet("{id:int}")]
+    public async Task<IActionResult> GetAppointmentById(int id)
+    {
+        try
+        {
+            var appt = await _context.Appointments.FirstOrDefaultAsync(a => a.AppointmentId == id);
+            if (appt == null)
+                return NotFound(new { success = false, message = $"Không tìm thấy lịch hẹn với AppointmentId={id}." });
+
+            var formattedList = await FormatAppointmentListAsync(new List<Appointment> { appt });
+            return Ok(formattedList.FirstOrDefault());
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine("GetAppointmentById error: " + ex.Message);
+            return StatusCode(500, new { success = false, message = ex.Message });
+        }
+    }
+
+    [HttpPut("{id:int}")]
+    public async Task<IActionResult> UpdateAppointment(int id, [FromBody] UpdateAppointmentDto dto)
+    {
+        if (!AccessControl.IsStaff(User)) return this.ForbidJson();
+        try
+        {
+            var appt = await _context.Appointments.FirstOrDefaultAsync(a => a.AppointmentId == id);
+            if (appt == null)
+                return NotFound(new { success = false, message = $"Không tìm thấy lịch hẹn với AppointmentId={id}." });
+
+            if (dto.DoctorId > 0) appt.DoctorId = dto.DoctorId;
+            if (dto.PatientId > 0) appt.PatientId = dto.PatientId;
+            if (!string.IsNullOrEmpty(dto.Reason)) appt.Reason = dto.Reason;
+            if (dto.StatusId > 0) appt.StatusId = dto.StatusId;
+
+            // Note (Ghi chú) - Ưu tiên lấy ghi chú tùy chỉnh từ frontend
+            var customNote = dto.Note ?? dto.Notes;
+            if (customNote != null)
+            {
+                appt.Note = customNote;
+            }
+            else if (!string.IsNullOrEmpty(dto.DoctorName) || !string.IsNullOrEmpty(dto.Fee))
+            {
+                /* Old code comment:
+                var docNameStr = !string.IsNullOrEmpty(dto.DoctorName) ? dto.DoctorName : "BS. Bệnh viện";
+                var feeStr = !string.IsNullOrEmpty(dto.Fee) ? dto.Fee : "250.000đ";
+                appt.Note = $"{docNameStr} | {feeStr}";
+                */
+                var docNameStr = !string.IsNullOrEmpty(dto.DoctorName) ? dto.DoctorName : "BS. Bệnh viện";
+                var feeStr = !string.IsNullOrEmpty(dto.Fee) ? dto.Fee : "250.000đ";
+                if (string.IsNullOrEmpty(appt.Note))
+                {
+                    appt.Note = $"{docNameStr} | {feeStr}";
+                }
+            }
+
+            if (!string.IsNullOrEmpty(dto.Date))
+            {
+                if (DateOnly.TryParseExact(dto.Date, new[] { "d/M/yyyy", "dd/MM/yyyy", "yyyy-MM-dd" },
+                    System.Globalization.CultureInfo.InvariantCulture,
+                    System.Globalization.DateTimeStyles.None, out var parsedDate))
+                {
+                    appt.AppointmentDate = parsedDate;
+                }
+            }
+
+            if (dto.StatusId == 5 || dto.CancelReason != null || !string.IsNullOrEmpty(dto.CancelledBy))
+            {
+                if (dto.CancelReason != null) appt.CancelReason = dto.CancelReason;
+                var cancellerGuid = await ResolveCancellerUserIdAsync(dto.CancelledBy ?? "Lễ tân", appt.PatientId, appt.DoctorId);
+                if (cancellerGuid.HasValue) appt.CancelledBy = cancellerGuid.Value;
+                if (!appt.CancelledAt.HasValue) appt.CancelledAt = DateTime.UtcNow;
+            }
+
+            if (dto.NurseNote != null)
+            {
+                /* Old code comment:
+                appt.NurseNote = dto.NurseNote;
+                */
+                var inputStr = dto.NurseNote.Trim();
+                if (string.IsNullOrWhiteSpace(inputStr))
+                {
+                    appt.NurseNote = null;
+                }
+                else if (inputStr.StartsWith("{") && inputStr.EndsWith("}"))
+                {
+                    appt.NurseNote = inputStr;
+                }
+                else
+                {
+                    try
+                    {
+                        // Kiểm tra trích xuất tự động nếu gõ dạng "Huyết áp: 90/80", "Nhịp tim: 120", "Thân nhiệt: 37", "BMI: 21.6"
+                        string? bp = null;
+                        int hr = 0;
+                        double temp = 0;
+                        double bmiVal = 0;
+
+                        var bpMatch = System.Text.RegularExpressions.Regex.Match(inputStr, @"Huyết áp\s*:\s*([\d\/]+)", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+                        if (bpMatch.Success) bp = bpMatch.Groups[1].Value;
+
+                        var hrMatch = System.Text.RegularExpressions.Regex.Match(inputStr, @"Nhịp tim\s*:\s*(\d+)", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+                        if (hrMatch.Success && int.TryParse(hrMatch.Groups[1].Value, out var hrParsed)) hr = hrParsed;
+
+                        var tempMatch = System.Text.RegularExpressions.Regex.Match(inputStr, @"Thân nhiệt\s*:\s*([\d\.]+)", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+                        if (tempMatch.Success && double.TryParse(tempMatch.Groups[1].Value, System.Globalization.CultureInfo.InvariantCulture, out var tempParsed)) temp = tempParsed;
+
+                        var bmiMatch = System.Text.RegularExpressions.Regex.Match(inputStr, @"BMI\s*:\s*([\d\.]+)", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+                        if (bmiMatch.Success && double.TryParse(bmiMatch.Groups[1].Value, System.Globalization.CultureInfo.InvariantCulture, out var bmiParsed)) bmiVal = bmiParsed;
+
+                        if (bp != null || hr > 0 || temp > 0 || bmiVal > 0)
+                        {
+                            var remainingNote = System.Text.RegularExpressions.Regex.Replace(inputStr, @"(Huyết áp|Nhịp tim|Thân nhiệt|BMI)\s*:\s*[^\s\n\r,]+", "", System.Text.RegularExpressions.RegexOptions.IgnoreCase).Trim();
+                            remainingNote = System.Text.RegularExpressions.Regex.Replace(remainingNote, @"^(Ghi chú điều dưỡng|Ghi chú)\s*:\s*", "", System.Text.RegularExpressions.RegexOptions.IgnoreCase).Trim();
+                            remainingNote = System.Text.RegularExpressions.Regex.Replace(remainingNote, @"^[,\s\.\-]+|[,\s\.\-]+$", "").Trim();
+
+                            /* Old code comment:
+                            var vitalsObj = new
+                            {
+                                bloodPressure = bp ?? "",
+                                heartRate = hr,
+                                temperature = temp,
+                                bmi = bmiVal,
+                                nurseNote = inputStr
+                            };
+                            */
+                            var vitalsObj = new
+                            {
+                                bloodPressure = bp ?? "",
+                                heartRate = hr,
+                                temperature = temp,
+                                bmi = bmiVal,
+                                nurseNote = remainingNote
+                            };
+                            appt.NurseNote = System.Text.Json.JsonSerializer.Serialize(vitalsObj);
+                        }
+                        else
+                        {
+                            /* Old code comment:
+                            if (!string.IsNullOrEmpty(appt.NurseNote) && appt.NurseNote.StartsWith("{"))
+                            {
+                                var dict = System.Text.Json.JsonSerializer.Deserialize<Dictionary<string, object>>(appt.NurseNote);
+                                if (dict != null)
+                                {
+                                    dict["nurseNote"] = inputStr;
+                                    appt.NurseNote = System.Text.Json.JsonSerializer.Serialize(dict);
+                                }
+                            }
+                            */
+                            appt.NurseNote = System.Text.Json.JsonSerializer.Serialize(new { nurseNote = inputStr });
+                        }
+                    }
+                    catch
+                    {
+                        appt.NurseNote = System.Text.Json.JsonSerializer.Serialize(new { nurseNote = inputStr });
+                    }
+                }
+            }
+
+            appt.UpdatedAt = DateTime.UtcNow;
+            await _context.SaveChangesAsync();
+
+            var formattedList = await FormatAppointmentListAsync(new List<Appointment> { appt });
+            return Ok(new { success = true, message = "Cập nhật thông tin lịch hẹn thành công.", data = formattedList.FirstOrDefault() });
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine("UpdateAppointment error: " + ex.Message);
+            return StatusCode(500, new { success = false, message = "Lỗi khi cập nhật lịch hẹn: " + ex.Message });
+        }
+    }
+
     // POST /api/appointments/{id}/checkin — Lễ Tân xác nhận Check-in bệnh nhân
     [HttpPost("{id}/checkin")]
     public async Task<IActionResult> CheckInAppointment(int id)
@@ -383,6 +557,69 @@ public class AppointmentsController : ControllerBase
         }
     }
 
+    private async Task<Guid?> ResolveCancellerUserIdAsync(string? cancellerStr, int? patientId = null, int? doctorId = null)
+    {
+        if (string.IsNullOrWhiteSpace(cancellerStr)) return null;
+
+        var lower = cancellerStr.Trim().ToLower();
+
+        // 1. Nếu đã là chuỗi GUID hợp lệ
+        if (Guid.TryParse(cancellerStr.Trim(), out var parsedGuid))
+        {
+            return parsedGuid;
+        }
+
+        // 2. Lễ tân / Nhân viên hủy (từ Web Admin)
+        if (lower.Contains("lễ tân") || lower.Contains("receptionist") || lower.Contains("nhân viên"))
+        {
+            var letanUser = await _context.Users.FirstOrDefaultAsync(u => u.RoleId == 4 || u.Email == "letan.minhchau@gmail.com");
+            if (letanUser != null) return letanUser.UserId;
+        }
+
+        // 3. Bệnh nhân tự hủy (Xử lý trên App Mobile)
+        if (lower.Contains("patient") || lower.Contains("bệnh nhân"))
+        {
+            if (patientId.HasValue && patientId.Value > 0)
+            {
+                var p = await _context.Patients.FirstOrDefaultAsync(pt => pt.PatientId == patientId.Value);
+                if (p != null && p.UserId != Guid.Empty) return p.UserId;
+            }
+            var firstPatientUser = await _context.Users.FirstOrDefaultAsync(u => u.RoleId == 3);
+            return firstPatientUser?.UserId;
+        }
+
+        // 4. Admin hủy (từ Web Admin)
+        if (lower.Contains("admin") || lower.Contains("quản trị"))
+        {
+            var adminUser = await _context.Users.FirstOrDefaultAsync(u => u.RoleId == 1);
+            if (adminUser != null) return adminUser.UserId;
+        }
+
+        // 5. Bác sĩ hủy (Khớp tên bác sĩ hoặc chuỗi chứa "bác sĩ")
+        if (lower.Contains("bác sĩ") || lower.Contains("doctor") || (doctorId.HasValue && doctorId.Value > 0))
+        {
+            if (doctorId.HasValue && doctorId.Value > 0)
+            {
+                var d = await _context.Doctors.FirstOrDefaultAsync(doc => doc.DoctorId == doctorId.Value);
+                if (d != null && d.UserId != Guid.Empty) return d.UserId;
+            }
+            var docUser = await _context.Users.FirstOrDefaultAsync(u => u.RoleId == 2);
+            if (docUser != null) return docUser.UserId;
+        }
+
+        // 5b. Tìm theo tên đầy đủ trong bảng Doctors/Users nếu truyền tên Bác sĩ
+        var matchedDoc = await _context.Doctors.FirstOrDefaultAsync(doc => doc.FullName != null && (doc.FullName.ToLower().Contains(lower) || lower.Contains(doc.FullName.ToLower())));
+        if (matchedDoc != null && matchedDoc.UserId != Guid.Empty) return matchedDoc.UserId;
+
+        // 6. Default Fallback cho Lễ tân Web Admin
+        var receptionistUser = await _context.Users.FirstOrDefaultAsync(u => u.RoleId == 4 || u.RoleId == 1 || u.Email == "letan.minhchau@gmail.com");
+        if (receptionistUser != null) return receptionistUser.UserId;
+
+        // Fallback: Lấy user_id nhân viên bất kỳ trong CSDL
+        var anyUser = await _context.Users.FirstOrDefaultAsync();
+        return anyUser?.UserId;
+    }
+
     private async Task<List<AppointmentResponseDto>> FormatAppointmentListAsync(List<Appointment> list)
     {
         var result = new List<AppointmentResponseDto>();
@@ -399,6 +636,9 @@ public class AppointmentsController : ControllerBase
 
         var apptIds = list.Select(a => a.AppointmentId).ToList();
         var invoiceMap = await _context.Invoices.Where(i => apptIds.Contains(i.AppointmentId)).ToDictionaryAsync(i => i.AppointmentId);
+
+        var cancellerUserIds = list.Where(a => a.CancelledBy.HasValue && a.CancelledBy.Value != Guid.Empty).Select(a => a.CancelledBy!.Value).Distinct().ToList();
+        var cancellerUserMap = await _context.Users.Where(u => cancellerUserIds.Contains(u.UserId)).ToDictionaryAsync(u => u.UserId);
 
         foreach (var appt in list)
         {
@@ -516,6 +756,30 @@ public class AppointmentsController : ControllerBase
                 }
             }
 
+            string? cancelledByDisplay = null;
+            if (appt.CancelledBy.HasValue && appt.CancelledBy.Value != Guid.Empty)
+            {
+                if (cancellerUserMap.TryGetValue(appt.CancelledBy.Value, out var cUser))
+                {
+                    /* Old code comment:
+                    if (!string.IsNullOrWhiteSpace(cUser.FullName))
+                    {
+                        cancelledByDisplay = cUser.FullName;
+                    }
+                    */
+                    if (cUser.RoleId == 4) cancelledByDisplay = "Lễ tân";
+                    else if (cUser.RoleId == 1) cancelledByDisplay = "Admin";
+                    else if (cUser.RoleId == 2) cancelledByDisplay = !string.IsNullOrEmpty(docName) ? docName : (!string.IsNullOrWhiteSpace(cUser.FullName) ? cUser.FullName : "Bác sĩ");
+                    else if (cUser.RoleId == 3) cancelledByDisplay = "Bệnh nhân";
+                    else if (!string.IsNullOrWhiteSpace(cUser.FullName)) cancelledByDisplay = cUser.FullName;
+                    else cancelledByDisplay = "Nhân viên";
+                }
+                else
+                {
+                    cancelledByDisplay = appt.CancelledBy.Value.ToString();
+                }
+            }
+
             result.Add(new AppointmentResponseDto
             {
                 AppointmentId = appt.AppointmentId,
@@ -536,6 +800,12 @@ public class AppointmentsController : ControllerBase
                 Fee = feeStr,
                 IsPackage = isPkg,
                 CreatedAt = appt.CreatedAt,
+                UpdatedAt = appt.UpdatedAt,
+                CancelReason = appt.CancelReason,
+                CancelledAt = appt.CancelledAt,
+                CancelledBy = cancelledByDisplay,
+                Note = appt.Note,
+                MemberId = appt.MemberId,
                 NurseNote = appt.NurseNote   // Truyền bộ sinh hiệu cho WinForms BS & Điều dưỡng
             });
         }
@@ -554,6 +824,8 @@ public class AppointmentsController : ControllerBase
             {
                 appt.StatusId = 5; // 5 = Cancelled
                 appt.CancelledAt = DateTime.UtcNow;
+
+                /* Old code comment out per rule:
                 // Store who cancelled inside CancelReason (CancelledBy is uuid type, cannot store text)
                 var cancellerInfo = !string.IsNullOrEmpty(req?.CancelledBy)
                     ? $"Hủy bởi: {req.CancelledBy}"
@@ -562,6 +834,16 @@ public class AppointmentsController : ControllerBase
                     ? $"{req.CancelReason} | {cancellerInfo}"
                     : cancellerInfo;
                 // Do NOT write to CancelledBy — it's uuid type in PostgreSQL
+                */
+
+                appt.CancelReason = !string.IsNullOrEmpty(req?.CancelReason) ? req.CancelReason : "Hủy lịch hẹn";
+
+                // Save real UUID user_id into CancelledBy column in PostgreSQL database
+                var cancellerGuid = await ResolveCancellerUserIdAsync(req?.CancelledBy, appt.PatientId, appt.DoctorId);
+                if (cancellerGuid.HasValue)
+                {
+                    appt.CancelledBy = cancellerGuid.Value;
+                }
 
                 // App Mobile luôn gửi cancelledBy="patient" khi bệnh nhân tự hủy (xem apiService.ts) —
                 // chỉ gửi thông báo khi KHÔNG PHẢI bệnh nhân tự hủy (vd: Lễ Tân hủy tại quầy), vì bệnh
@@ -633,7 +915,13 @@ public class AppointmentsController : ControllerBase
                 {
                     appt.StatusId = 5; // 5 = Cancelled
                     appt.CancelledAt = DateTime.UtcNow;
+                    /* Old code comment:
                     appt.CancelReason = "Bác sĩ trực hủy lịch từ giao diện Desktop";
+                    */
+                    if (string.IsNullOrEmpty(appt.CancelReason))
+                    {
+                        appt.CancelReason = "Bác sĩ trực hủy lịch từ giao diện Desktop";
+                    }
                     if (targetUserId != Guid.Empty)
                     {
                         _context.Notifications.Add(new Notification
@@ -794,6 +1082,26 @@ public class AppointmentsController : ControllerBase
         {
             Console.WriteLine("Error saving nurse vitals: " + ex.Message);
             return StatusCode(500, new { success = false, message = ex.Message });
+        }
+    }
+
+    private async Task SyncSequencesAsync()
+    {
+        try
+        {
+            var conn = _context.Database.GetDbConnection();
+            if (conn.State != ConnectionState.Open) await conn.OpenAsync();
+            using var cmd = conn.CreateCommand();
+            cmd.CommandText = @"
+                SELECT setval(
+                    pg_get_serial_sequence('appointments', 'appointment_id'),
+                    (SELECT COALESCE(MAX(appointment_id), 1) FROM appointments)
+                );";
+            await cmd.ExecuteNonQueryAsync();
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine("Warning: SyncSequencesAsync failed for appointments: " + ex.Message);
         }
     }
 }

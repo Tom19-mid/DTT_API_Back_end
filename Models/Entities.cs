@@ -339,6 +339,9 @@ public class Appointment
     [Column("patient_id")]
     public int PatientId { get; set; }
 
+    [Column("member_id")]
+    public int? MemberId { get; set; }
+
     [Column("doctor_id")]
     public int DoctorId { get; set; }
 
