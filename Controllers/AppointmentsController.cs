@@ -108,7 +108,7 @@ public class AppointmentsController : ControllerBase
                     if (scheduleId > 0)
                     {
                         using var insSlot = conn.CreateCommand();
-                        insSlot.CommandText = $"INSERT INTO doctor_schedule_slots (schedule_id, slot_order, start_time, end_time, status) VALUES ({scheduleId}, 1, '08:30:00'::time, '09:30:00'::time, 'Available') RETURNING slot_id";
+                        insSlot.CommandText = $"INSERT INTO doctor_schedule_slots (schedule_id, slot_order, start_time, end_time, status) VALUES ({scheduleId}, 1, '08:30:00'::time, '09:00:00'::time, 'Available') RETURNING slot_id";
                         var newSlot = await insSlot.ExecuteScalarAsync();
                         if (newSlot != null && newSlot != DBNull.Value) slotId = Convert.ToInt32(newSlot);
                     }
@@ -136,7 +136,7 @@ public class AppointmentsController : ControllerBase
                         var scVal = await insAny.ExecuteScalarAsync();
                         int scId = scVal != null && scVal != DBNull.Value ? Convert.ToInt32(scVal) : 1;
                         using var insSl = conn2.CreateCommand();
-                        insSl.CommandText = $"INSERT INTO doctor_schedule_slots (schedule_id, slot_order, start_time, end_time, status) VALUES ({scId}, 1, '08:00:00', '09:00:00', 'Available') RETURNING slot_id";
+                        insSl.CommandText = $"INSERT INTO doctor_schedule_slots (schedule_id, slot_order, start_time, end_time, status) VALUES ({scId}, 1, '08:00:00', '08:30:00', 'Available') RETURNING slot_id";
                         var slVal = await insSl.ExecuteScalarAsync();
                         if (slVal != null && slVal != DBNull.Value) slotId = Convert.ToInt32(slVal);
                     }

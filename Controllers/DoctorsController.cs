@@ -790,20 +790,36 @@ public class DoctorsController : ControllerBase
             using var slotCmd = conn.CreateCommand();
             slotCmd.CommandText = @"
                 INSERT INTO doctor_schedule_slots (schedule_id, slot_order, start_time, end_time, status)
-                SELECT ds.schedule_id, 1, '07:30:00'::time, '08:30:00'::time, 'Available'
+                SELECT ds.schedule_id, 1, '07:30:00'::time, '08:00:00'::time, 'Available'
                 FROM doctor_schedules ds WHERE NOT EXISTS (SELECT 1 FROM doctor_schedule_slots dss WHERE dss.schedule_id = ds.schedule_id AND (slot_order = 1 OR start_time = '07:30:00'::time));
 
                 INSERT INTO doctor_schedule_slots (schedule_id, slot_order, start_time, end_time, status)
-                SELECT ds.schedule_id, 2, '08:30:00'::time, '09:30:00'::time, 'Available'
-                FROM doctor_schedules ds WHERE NOT EXISTS (SELECT 1 FROM doctor_schedule_slots dss WHERE dss.schedule_id = ds.schedule_id AND (slot_order = 2 OR start_time = '08:30:00'::time));
+                SELECT ds.schedule_id, 2, '08:00:00'::time, '08:30:00'::time, 'Available'
+                FROM doctor_schedules ds WHERE NOT EXISTS (SELECT 1 FROM doctor_schedule_slots dss WHERE dss.schedule_id = ds.schedule_id AND (slot_order = 2 OR start_time = '08:00:00'::time));
 
                 INSERT INTO doctor_schedule_slots (schedule_id, slot_order, start_time, end_time, status)
-                SELECT ds.schedule_id, 3, '13:30:00'::time, '14:30:00'::time, 'Available'
-                FROM doctor_schedules ds WHERE NOT EXISTS (SELECT 1 FROM doctor_schedule_slots dss WHERE dss.schedule_id = ds.schedule_id AND (slot_order = 3 OR start_time = '13:30:00'::time));
+                SELECT ds.schedule_id, 3, '08:30:00'::time, '09:00:00'::time, 'Available'
+                FROM doctor_schedules ds WHERE NOT EXISTS (SELECT 1 FROM doctor_schedule_slots dss WHERE dss.schedule_id = ds.schedule_id AND (slot_order = 3 OR start_time = '08:30:00'::time));
 
                 INSERT INTO doctor_schedule_slots (schedule_id, slot_order, start_time, end_time, status)
-                SELECT ds.schedule_id, 4, '15:30:00'::time, '16:30:00'::time, 'Available'
-                FROM doctor_schedules ds WHERE NOT EXISTS (SELECT 1 FROM doctor_schedule_slots dss WHERE dss.schedule_id = ds.schedule_id AND (slot_order = 4 OR start_time = '15:30:00'::time));";
+                SELECT ds.schedule_id, 4, '09:00:00'::time, '09:30:00'::time, 'Available'
+                FROM doctor_schedules ds WHERE NOT EXISTS (SELECT 1 FROM doctor_schedule_slots dss WHERE dss.schedule_id = ds.schedule_id AND (slot_order = 4 OR start_time = '09:00:00'::time));
+
+                INSERT INTO doctor_schedule_slots (schedule_id, slot_order, start_time, end_time, status)
+                SELECT ds.schedule_id, 5, '13:30:00'::time, '14:00:00'::time, 'Available'
+                FROM doctor_schedules ds WHERE NOT EXISTS (SELECT 1 FROM doctor_schedule_slots dss WHERE dss.schedule_id = ds.schedule_id AND (slot_order = 5 OR start_time = '13:30:00'::time));
+
+                INSERT INTO doctor_schedule_slots (schedule_id, slot_order, start_time, end_time, status)
+                SELECT ds.schedule_id, 6, '14:00:00'::time, '14:30:00'::time, 'Available'
+                FROM doctor_schedules ds WHERE NOT EXISTS (SELECT 1 FROM doctor_schedule_slots dss WHERE dss.schedule_id = ds.schedule_id AND (slot_order = 6 OR start_time = '14:00:00'::time));
+
+                INSERT INTO doctor_schedule_slots (schedule_id, slot_order, start_time, end_time, status)
+                SELECT ds.schedule_id, 7, '15:30:00'::time, '16:00:00'::time, 'Available'
+                FROM doctor_schedules ds WHERE NOT EXISTS (SELECT 1 FROM doctor_schedule_slots dss WHERE dss.schedule_id = ds.schedule_id AND (slot_order = 7 OR start_time = '15:30:00'::time));
+
+                INSERT INTO doctor_schedule_slots (schedule_id, slot_order, start_time, end_time, status)
+                SELECT ds.schedule_id, 8, '16:00:00'::time, '16:30:00'::time, 'Available'
+                FROM doctor_schedules ds WHERE NOT EXISTS (SELECT 1 FROM doctor_schedule_slots dss WHERE dss.schedule_id = ds.schedule_id AND (slot_order = 8 OR start_time = '16:00:00'::time));";
             await slotCmd.ExecuteNonQueryAsync();
         }
         catch (Exception ex)
