@@ -19,7 +19,7 @@ public class UsersController : ControllerBase
         _context = context;
     }
 
-    // Helper chuẩn hóa trạng thái về đúng constraint database (Active / Inactive / Locked)
+    /* [OLD CODE COMMENTED OUT — chưa hỗ trợ OnLeave cho tài khoản]
     private static string NormalizeUserStatus(string? rawStatus)
     {
         if (string.IsNullOrWhiteSpace(rawStatus)) return "Active";
@@ -30,6 +30,22 @@ public class UsersController : ControllerBase
             return "Locked";
         if (s == "Ngưng hoạt động" || s.Equals("inactive", StringComparison.OrdinalIgnoreCase))
             return "Inactive";
+        return "Active";
+    }
+    */
+    // Helper chuẩn hóa trạng thái về đúng constraint database (Active / Inactive / Locked / OnLeave)
+    private static string NormalizeUserStatus(string? rawStatus)
+    {
+        if (string.IsNullOrWhiteSpace(rawStatus)) return "Active";
+        var s = rawStatus.Trim();
+        if (s == "Đang hoạt động" || s.Equals("active", StringComparison.OrdinalIgnoreCase))
+            return "Active";
+        if (s == "Đã khóa" || s.Equals("locked", StringComparison.OrdinalIgnoreCase))
+            return "Locked";
+        if (s == "Ngưng hoạt động" || s.Equals("inactive", StringComparison.OrdinalIgnoreCase))
+            return "Inactive";
+        if (s == "Nghỉ phép" || s.Equals("onleave", StringComparison.OrdinalIgnoreCase))
+            return "OnLeave";
         return "Active";
     }
 
@@ -60,6 +76,10 @@ public class UsersController : ControllerBase
                 else if (s == "inactive" || s == "ngưng hoạt động")
                 {
                     query = query.Where(u => u.Status == "Inactive" || u.Status == "Ngưng hoạt động");
+                }
+                else if (s == "onleave" || s == "nghỉ phép")
+                {
+                    query = query.Where(u => u.Status == "OnLeave" || u.Status == "Nghỉ phép");
                 }
                 else
                 {
@@ -308,9 +328,44 @@ public class UsersController : ControllerBase
                 u.Email = dto.Email;
             }
 
+            /* [OLD CODE COMMENTED OUT — chỉ gán RoleId mà chưa kiểm tra/tạo hồ sơ Bác sĩ hoặc Bệnh nhân]
             if (dto.RoleId.HasValue && dto.RoleId.Value > 0)
             {
                 u.RoleId = dto.RoleId.Value;
+            }
+            */
+            if (dto.RoleId.HasValue && dto.RoleId.Value > 0)
+            {
+                u.RoleId = dto.RoleId.Value;
+
+                // Nếu đổi vai trò sang Bác sĩ (RoleId == 2) -> Đảm bảo có hồ sơ Bác sĩ
+                if (dto.RoleId.Value == 2)
+                {
+                    var existingDoc = await _context.Doctors.FirstOrDefaultAsync(x => x.UserId == id);
+                    if (existingDoc == null)
+                    {
+                        _context.Doctors.Add(new Doctor
+                        {
+                            UserId = id,
+                            FullName = u.FullName ?? dto.FullName ?? "Bác sĩ DTT",
+                            Status = u.Status ?? "Active"
+                        });
+                    }
+                }
+                // Nếu đổi vai trò sang Bệnh nhân (RoleId == 3) -> Đảm bảo có hồ sơ Bệnh nhân
+                else if (dto.RoleId.Value == 3)
+                {
+                    var existingPatient = await _context.Patients.FirstOrDefaultAsync(x => x.UserId == id);
+                    if (existingPatient == null)
+                    {
+                        _context.Patients.Add(new Patient
+                        {
+                            UserId = id,
+                            FullName = u.FullName ?? dto.FullName ?? "Bệnh nhân",
+                            PhoneNumber = u.PhoneNumber ?? ""
+                        });
+                    }
+                }
             }
 
             if (dto.FullName != null)
@@ -324,15 +379,34 @@ public class UsersController : ControllerBase
             }
 
             u.UpdatedAt = DateTime.UtcNow;
-            await _context.SaveChangesAsync();
 
             // Cập nhật tên trong hồ sơ Bệnh nhân nếu có
             var p = await _context.Patients.FirstOrDefaultAsync(x => x.UserId == id);
             if (p != null && !string.IsNullOrWhiteSpace(dto.FullName))
             {
                 p.FullName = dto.FullName;
-                await _context.SaveChangesAsync();
             }
+
+            // Đồng bộ trạng thái và thông tin sang hồ sơ Bác sĩ tương ứng nếu có
+            var d = await _context.Doctors.FirstOrDefaultAsync(x => x.UserId == id);
+            if (d != null)
+            {
+                if (!string.IsNullOrWhiteSpace(dto.FullName)) d.FullName = dto.FullName;
+                if (!string.IsNullOrWhiteSpace(dto.Status))
+                {
+                    string normUserSt = NormalizeUserStatus(dto.Status);
+                    d.Status = normUserSt switch
+                    {
+                        "Active" => "Active",
+                        "Inactive" => "Inactive",
+                        "Locked" => "Locked",
+                        "OnLeave" => "OnLeave",
+                        _ => normUserSt
+                    };
+                }
+            }
+
+            await _context.SaveChangesAsync();
 
             var role = await _context.Roles.FirstOrDefaultAsync(r => r.RoleId == u.RoleId);
 
@@ -368,8 +442,30 @@ public class UsersController : ControllerBase
                 return NotFound(new { message = "Không tìm thấy tài khoản." });
             }
 
+            /* [OLD CODE COMMENTED OUT — chưa đồng bộ trạng thái sang bảng doctors]
             u.Status = NormalizeUserStatus(dto.Status);
             u.UpdatedAt = DateTime.UtcNow;
+            await _context.SaveChangesAsync();
+            */
+
+            string normStatus = NormalizeUserStatus(dto.Status);
+            u.Status = normStatus;
+            u.UpdatedAt = DateTime.UtcNow;
+
+            // Đồng bộ trạng thái sang hồ sơ Bác sĩ tương ứng nếu có
+            var d = await _context.Doctors.FirstOrDefaultAsync(x => x.UserId == id);
+            if (d != null)
+            {
+                d.Status = normStatus switch
+                {
+                    "Active" => "Active",
+                    "Inactive" => "Inactive",
+                    "Locked" => "Locked",
+                    "OnLeave" => "OnLeave",
+                    _ => normStatus
+                };
+            }
+
             await _context.SaveChangesAsync();
 
             return Ok(new { success = true, message = $"Đã cập nhật trạng thái tài khoản thành: {u.Status}", status = u.Status });

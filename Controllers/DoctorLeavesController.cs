@@ -75,12 +75,76 @@ public class DoctorLeavesController : ControllerBase
         return DateOnly.FromDateTime(DateTime.Today);
     }
 
+    // Helper tự động kiểm tra và cập nhật trạng thái Bác sĩ sang 'Active' (Đang hoạt động) khi hết thời gian nghỉ phép (LeaveEndDate < Today)
+    public static async Task AutoUpdateExpiredDoctorLeavesAsync(AppDbContext context)
+    {
+        try
+        {
+            var today = DateOnly.FromDateTime(DateTime.Today);
+
+            // Lấy tất cả bác sĩ đang ở trạng thái 'OnLeave'
+            var onLeaveDoctors = await context.Doctors
+                .Where(d => d.Status == "OnLeave")
+                .ToListAsync();
+
+            if (!onLeaveDoctors.Any()) return;
+
+            var docIds = onLeaveDoctors.Select(d => d.DoctorId).ToList();
+
+            // Lấy tất cả đơn nghỉ phép đã duyệt (Approved) của các bác sĩ này
+            var approvedLeaves = await context.DoctorLeaves
+                .Where(l => docIds.Contains(l.DoctorId) && l.Status == "Approved")
+                .ToListAsync();
+
+            bool hasChanges = false;
+
+            foreach (var doc in onLeaveDoctors)
+            {
+                // Kiểm tra xem bác sĩ có đơn nghỉ phép nào đang còn hiệu lực trong ngày hôm nay hoặc tương lai không (LeaveEndDate >= today)
+                bool hasActiveOrFutureLeave = approvedLeaves.Any(l => l.DoctorId == doc.DoctorId && l.LeaveEndDate >= today);
+
+                if (!hasActiveOrFutureLeave)
+                {
+                    // Đã hết thời gian nghỉ phép -> Tự động chuyển trạng thái Bác sĩ về Active (Đang hoạt động)
+                    doc.Status = "Active";
+
+                    var user = await context.Users.FirstOrDefaultAsync(u => u.UserId == doc.UserId);
+                    /* [OLD CODE COMMENTED OUT — chỉ kiểm tra Inactive]
+                    if (user != null && user.Status == "Inactive")
+                    {
+                        user.Status = "Active";
+                        user.UpdatedAt = DateTime.UtcNow;
+                    }
+                    */
+                    if (user != null && (user.Status == "Inactive" || user.Status == "OnLeave"))
+                    {
+                        user.Status = "Active";
+                        user.UpdatedAt = DateTime.UtcNow;
+                    }
+                    hasChanges = true;
+                }
+            }
+
+            if (hasChanges)
+            {
+                await context.SaveChangesAsync();
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[AutoUpdateExpiredDoctorLeaves Warning] Lỗi quét tự động trạng thái bác sĩ: {ex.Message}");
+        }
+    }
+
     // GET /api/doctors/leaves — Lấy danh sách tất cả đơn xin nghỉ phép
     [HttpGet]
     public async Task<IActionResult> GetLeaves([FromQuery] string? status)
     {
         try
         {
+            // Tự động kiểm tra và cập nhật các bác sĩ đã hết thời gian nghỉ phép
+            await AutoUpdateExpiredDoctorLeavesAsync(_context);
+
             var leavesQuery = _context.DoctorLeaves.AsNoTracking().AsQueryable();
 
             if (!string.IsNullOrWhiteSpace(status) && !status.Equals("Tất cả", StringComparison.OrdinalIgnoreCase) && !status.Equals("All", StringComparison.OrdinalIgnoreCase))
@@ -167,9 +231,14 @@ public class DoctorLeavesController : ControllerBase
 
                     if (newDbStatus == "Approved")
                     {
-                        // Đã duyệt đơn nghỉ phép -> Đổi trạng thái Bác sĩ sang "OnLeave"
+                        // Đã duyệt đơn nghỉ phép -> Đổi trạng thái Bác sĩ sang "OnLeave" (Nghỉ phép)
                         doctor.Status = "OnLeave";
+
+                        /* [OLD CODE COMMENTED OUT — lưu Inactive]
                         if (user != null) user.Status = "Inactive";
+                        */
+                        // Đồng bộ trạng thái tài khoản Bác sĩ trong bảng users sang "OnLeave" (Nghỉ phép)
+                        if (user != null) user.Status = "OnLeave";
 
                         // Giữ nguyên lịch trong CSDL, chỉ cập nhật trạng thái lịch làm việc (doctor_schedules/slots) sang 'Off'
                         try

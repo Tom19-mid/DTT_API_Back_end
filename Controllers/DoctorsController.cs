@@ -123,13 +123,15 @@ public class DoctorsController : ControllerBase
             await SeedDoctorSchedulesAsync();
         }
 
-        /*
-        // Code cũ chưa dùng AsNoTracking():
-        var specialtiesDict = await _context.Specialties.ToDictionaryAsync(s => s.SpecialtyId, s => s.SpecialtyName);
-        var userIds = await _context.Doctors.Select(d => d.UserId).Distinct().ToListAsync();
-        var usersDict = await _context.Users.Where(u => userIds.Contains(u.UserId)).ToDictionaryAsync(u => u.UserId);
-        var query = _context.Doctors.AsQueryable();
+        /* [OLD CODE COMMENTED OUT — chưa quét cập nhật trạng thái khi hết hạn nghỉ phép]
+        var specialtiesDict = await _context.Specialties.AsNoTracking().ToDictionaryAsync(s => s.SpecialtyId, s => s.SpecialtyName);
+        var userIds = await _context.Doctors.AsNoTracking().Select(d => d.UserId).Distinct().ToListAsync();
+        var usersDict = await _context.Users.AsNoTracking().Where(u => userIds.Contains(u.UserId)).ToDictionaryAsync(u => u.UserId);
         */
+
+        // Tự động kiểm tra và cập nhật các bác sĩ đã hết thời gian nghỉ phép sang 'Active'
+        await DoctorLeavesController.AutoUpdateExpiredDoctorLeavesAsync(_context);
+
         var specialtiesDict = await _context.Specialties.AsNoTracking().ToDictionaryAsync(s => s.SpecialtyId, s => s.SpecialtyName);
         var userIds = await _context.Doctors.AsNoTracking().Select(d => d.UserId).Distinct().ToListAsync();
         var usersDict = await _context.Users.AsNoTracking().Where(u => userIds.Contains(u.UserId)).ToDictionaryAsync(u => u.UserId);
@@ -156,6 +158,8 @@ public class DoctorsController : ControllerBase
 
         var doctors = await query.ToListAsync();
 
+        var today = DateOnly.FromDateTime(DateTime.Today);
+
         var result = doctors.Select(d => {
             var master = doctorMasterList.FirstOrDefault(m => d.FullName != null && d.FullName.Contains(m.Name.Substring(m.Name.LastIndexOf(' ') + 1)));
             usersDict.TryGetValue(d.UserId, out var u);
@@ -168,7 +172,7 @@ public class DoctorsController : ControllerBase
                 "Active" or "active" or "Đang hoạt động" => "Đang hoạt động",
                 "Inactive" or "inactive" or "Ngưng hoạt động" => "Ngưng hoạt động",
                 "Locked" or "locked" or "Đã khóa" => "Đã khóa",
-                "OnLeave" or "onleave" or "Nghỉ phép" => "Nghỉ phép",
+                "OnLeave" or "onleave" or "Nghỉ phép" => (leaveRecord != null && leaveRecord.LeaveEndDate < today) ? "Đang hoạt động" : "Nghỉ phép",
                 _ => "Đang hoạt động"
             };
 
@@ -240,7 +244,7 @@ public class DoctorsController : ControllerBase
         return DateOnly.FromDateTime(DateTime.Today);
     }
 
-    // Helper chuẩn hóa trạng thái cho bảng users (chỉ chấp nhận Active / Inactive / Locked)
+    /* [OLD CODE COMMENTED OUT — bảng users trước đây chỉ map OnLeave về Inactive]
     private static string NormalizeUserStatus(string? rawStatus)
     {
         if (string.IsNullOrWhiteSpace(rawStatus)) return "Active";
@@ -253,6 +257,22 @@ public class DoctorsController : ControllerBase
             return "Inactive";
         if (s == "Nghỉ phép" || s.Equals("onleave", StringComparison.OrdinalIgnoreCase))
             return "Inactive"; // Bảng users chỉ hỗ trợ Active, Inactive, Locked
+        return "Active";
+    }
+    */
+    // Helper chuẩn hóa trạng thái cho bảng users (chấp nhận Active / Inactive / Locked / OnLeave)
+    private static string NormalizeUserStatus(string? rawStatus)
+    {
+        if (string.IsNullOrWhiteSpace(rawStatus)) return "Active";
+        var s = rawStatus.Trim();
+        if (s == "Đang hoạt động" || s.Equals("active", StringComparison.OrdinalIgnoreCase))
+            return "Active";
+        if (s == "Đã khóa" || s.Equals("locked", StringComparison.OrdinalIgnoreCase))
+            return "Locked";
+        if (s == "Ngưng hoạt động" || s.Equals("inactive", StringComparison.OrdinalIgnoreCase))
+            return "Inactive";
+        if (s == "Nghỉ phép" || s.Equals("onleave", StringComparison.OrdinalIgnoreCase))
+            return "OnLeave";
         return "Active";
     }
 

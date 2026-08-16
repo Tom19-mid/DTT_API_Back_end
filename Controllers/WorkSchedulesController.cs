@@ -188,7 +188,16 @@ public class WorkSchedulesController : ControllerBase
                     foreach (var sch in scheduleList)
                     {
                         var rawSlots = slotMap.TryGetValue(sch.ScheduleId, out var existing) ? existing : new List<TimeSlotDto>();
+
+                        /* [OLD CODE COMMENTED OUT — tự động sinh thêm nấc 30 phút làm lệch số lượng khung giờ so với CSDL thật]
                         var slots = Generate30MinSlotsInMemory(sch.StartTime, sch.EndTime, sch.ScheduleId, rawSlots);
+                        */
+
+                        // Ưu tiên lấy đúng 100% danh sách khung giờ thật từ database:
+                        var slots = (rawSlots != null && rawSlots.Count > 0)
+                            ? rawSlots.OrderBy(s => s.SlotOrder).ThenBy(s => s.StartTime).ToList()
+                            : Generate30MinSlotsInMemory(sch.StartTime, sch.EndTime, sch.ScheduleId, rawSlots);
+
                         sch.TimeSlots = slots;
                         string calculatedStatus = CalculateParentStatus(sch.Status, slots);
                         sch.Status = calculatedStatus;
