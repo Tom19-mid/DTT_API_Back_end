@@ -282,7 +282,11 @@ public class AppointmentsController : ControllerBase
         if (!AccessControl.IsStaff(User)) return this.ForbidJson();
         try
         {
+            /*
+            // Code cũ chưa dùng AsNoTracking():
             var query = _context.Appointments.AsQueryable();
+            */
+            var query = _context.Appointments.AsNoTracking().AsQueryable();
 
             if (doctorId.HasValue && doctorId.Value > 0)
             {

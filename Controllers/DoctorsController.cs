@@ -123,11 +123,18 @@ public class DoctorsController : ControllerBase
             await SeedDoctorSchedulesAsync();
         }
 
+        /*
+        // Code cũ chưa dùng AsNoTracking():
         var specialtiesDict = await _context.Specialties.ToDictionaryAsync(s => s.SpecialtyId, s => s.SpecialtyName);
         var userIds = await _context.Doctors.Select(d => d.UserId).Distinct().ToListAsync();
         var usersDict = await _context.Users.Where(u => userIds.Contains(u.UserId)).ToDictionaryAsync(u => u.UserId);
-
         var query = _context.Doctors.AsQueryable();
+        */
+        var specialtiesDict = await _context.Specialties.AsNoTracking().ToDictionaryAsync(s => s.SpecialtyId, s => s.SpecialtyName);
+        var userIds = await _context.Doctors.AsNoTracking().Select(d => d.UserId).Distinct().ToListAsync();
+        var usersDict = await _context.Users.AsNoTracking().Where(u => userIds.Contains(u.UserId)).ToDictionaryAsync(u => u.UserId);
+
+        var query = _context.Doctors.AsNoTracking().AsQueryable();
         // Strictly include only real doctors (BS., Bác sĩ, ThS., TS.)
         /* [OLD CODE COMMENTED OUT — bộ lọc lọc mất bác sĩ tạo mới không có tiền tố BS./Bác sĩ]
         query = query.Where(d => d.FullName != null && (d.FullName.Contains("BS.") || d.FullName.Contains("Bác sĩ") || d.FullName.Contains("ThS.") || d.FullName.Contains("TS.")));

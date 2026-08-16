@@ -112,10 +112,10 @@ public class PatientsController : ControllerBase
 
             // [NEW UPDATED CODE WITH STATUS JOINED FROM USERS TABLE]
             var patients = await (
-                from p in _context.Patients
-                join u in _context.Users on p.UserId equals u.UserId into pu
+                from p in _context.Patients.AsNoTracking()
+                join u in _context.Users.AsNoTracking() on p.UserId equals u.UserId into pu
                 from u in pu.DefaultIfEmpty()
-                join vUser in _context.Users on p.VerifiedBy equals vUser.UserId into vu
+                join vUser in _context.Users.AsNoTracking() on p.VerifiedBy equals vUser.UserId into vu
                 from vUser in vu.DefaultIfEmpty()
                 select new ReceptionProfileDto
                 {
@@ -139,14 +139,16 @@ public class PatientsController : ControllerBase
                 })
                 .ToListAsync();
 
-            /* [OLD CODE COMMENTED OUT — chưa join vUser trong FamilyMembers làm cho m.VerifiedBy trả về Guid rỗng/không định danh được Admin]
+            // [NEW UPDATED CODE] Đã bổ sung join vUser cho FamilyMembers và AsNoTracking()
             var familyMembers = await (
-                from m in _context.FamilyMembers
-                join owner in _context.Patients on m.OwnerPatientId equals owner.PatientId into om
+                from m in _context.FamilyMembers.AsNoTracking()
+                join owner in _context.Patients.AsNoTracking() on m.OwnerPatientId equals owner.PatientId into om
                 from owner in om.DefaultIfEmpty()
-                join u in _context.Users on (owner != null ? owner.UserId : Guid.Empty) equals u.UserId into mu
+                join u in _context.Users.AsNoTracking() on (owner != null ? owner.UserId : Guid.Empty) equals u.UserId into mu
                 from u in mu.DefaultIfEmpty()
-                select new ReceptionProfileDto
+                /*
+                
+  select new ReceptionProfileDto
                 {
                     Id = m.MemberId,
                     RecordType = "family_member",
@@ -168,7 +170,6 @@ public class PatientsController : ControllerBase
                     Status = u != null ? (u.Status ?? "Active") : "Active"
                 })
                 .ToListAsync();
-            */
 
             // [NEW UPDATED CODE] Đã bổ sung join vUser cho FamilyMembers để nhận diện chính xác Admin (RoleId == 1) hoặc Lễ tân
             var familyMembers = await (
@@ -178,6 +179,9 @@ public class PatientsController : ControllerBase
                 join u in _context.Users on (owner != null ? owner.UserId : Guid.Empty) equals u.UserId into mu
                 from u in mu.DefaultIfEmpty()
                 join vUser in _context.Users on m.VerifiedBy equals vUser.UserId into vu
+
+                */
+                join vUser in _context.Users.AsNoTracking() on m.VerifiedBy equals vUser.UserId into vu
                 from vUser in vu.DefaultIfEmpty()
                 select new ReceptionProfileDto
                 {

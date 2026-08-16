@@ -81,7 +81,7 @@ public class DoctorLeavesController : ControllerBase
     {
         try
         {
-            var leavesQuery = _context.DoctorLeaves.AsQueryable();
+            var leavesQuery = _context.DoctorLeaves.AsNoTracking().AsQueryable();
 
             if (!string.IsNullOrWhiteSpace(status) && !status.Equals("Tất cả", StringComparison.OrdinalIgnoreCase) && !status.Equals("All", StringComparison.OrdinalIgnoreCase))
             {
@@ -92,13 +92,13 @@ public class DoctorLeavesController : ControllerBase
             var leaves = await leavesQuery.OrderByDescending(l => l.CreatedAt).ToListAsync();
 
             var doctorIds = leaves.Select(l => l.DoctorId).Distinct().ToList();
-            var doctorsDict = await _context.Doctors.Where(d => doctorIds.Contains(d.DoctorId)).ToDictionaryAsync(d => d.DoctorId);
+            var doctorsDict = await _context.Doctors.AsNoTracking().Where(d => doctorIds.Contains(d.DoctorId)).ToDictionaryAsync(d => d.DoctorId);
 
             var userIds = doctorsDict.Values.Select(d => d.UserId).Distinct().ToList();
-            var usersDict = await _context.Users.Where(u => userIds.Contains(u.UserId)).ToDictionaryAsync(u => u.UserId);
+            var usersDict = await _context.Users.AsNoTracking().Where(u => userIds.Contains(u.UserId)).ToDictionaryAsync(u => u.UserId);
 
             var specialtyIds = doctorsDict.Values.Where(d => d.SpecialtyId.HasValue).Select(d => d.SpecialtyId!.Value).Distinct().ToList();
-            var specialtiesDict = await _context.Specialties.Where(s => specialtyIds.Contains(s.SpecialtyId)).ToDictionaryAsync(s => s.SpecialtyId, s => s.SpecialtyName);
+            var specialtiesDict = await _context.Specialties.AsNoTracking().Where(s => specialtyIds.Contains(s.SpecialtyId)).ToDictionaryAsync(s => s.SpecialtyId, s => s.SpecialtyName);
 
             var result = leaves.Select(l =>
             {

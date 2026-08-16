@@ -128,10 +128,15 @@ public class MedicinesController : ControllerBase
                 await Seed30MedicinesAsync();
             }
 
-            var categoriesMap = await _context.MedicineCategories
+            /*
+            // Code cũ chưa dùng AsNoTracking():
+            var categoriesMap = await _context.MedicineCategories.ToDictionaryAsync(c => c.CategoryId, c => c.CategoryName);
+            var medicinesList = await _context.Medicines.OrderByDescending(m => m.MedicineId).ToListAsync();
+            */
+            var categoriesMap = await _context.MedicineCategories.AsNoTracking()
                 .ToDictionaryAsync(c => c.CategoryId, c => c.CategoryName);
 
-            var medicinesList = await _context.Medicines
+            var medicinesList = await _context.Medicines.AsNoTracking()
                 .OrderByDescending(m => m.MedicineId)
                 .ToListAsync();
 
