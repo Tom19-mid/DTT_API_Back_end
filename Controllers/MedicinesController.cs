@@ -116,16 +116,25 @@ public class MedicinesController : ControllerBase
 
     #region MEDICINES API (BẢNG MEDICINES)
 
+    // Chỉ kiểm tra seed 1 lần/vòng đời app — trước đây CountAsync() (quét đếm toàn bảng, không có gì
+    // để dừng sớm như EXISTS) chạy trên MỌI lần gọi endpoint bán thuốc nóng nhất hệ thống, dù chỉ có
+    // ý nghĩa đúng 1 lần khi DB rỗng lúc khởi động.
+    private static bool _medicinesSeedChecked = false;
+
     // GET: api/Medicines
     [HttpGet]
     public async Task<IActionResult> GetMedicines()
     {
         try
         {
-            var count = await _context.Medicines.CountAsync();
-            if (count < 10)
+            if (!_medicinesSeedChecked)
             {
-                await Seed30MedicinesAsync();
+                var count = await _context.Medicines.CountAsync();
+                if (count < 10)
+                {
+                    await Seed30MedicinesAsync();
+                }
+                _medicinesSeedChecked = true;
             }
 
             /*

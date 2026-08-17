@@ -192,26 +192,29 @@ public class NotificationsController : ControllerBase
         }
     }
 
-    // ── PUT /api/notifications/read-all (Đánh dấu đã đọc tất cả thông báo) ───
+    // ── PUT /api/notifications/read-all (Đánh dấu đã đọc tất cả thông báo CỦA NGƯỜI GỌI) ───
     [HttpPut("read-all")]
     public async Task<IActionResult> MarkAllNotificationsAsRead()
     {
         try
         {
-            var unreadList = await _context.Notifications.Where(n => !n.IsRead).ToListAsync();
-            DateTime now = DateTime.UtcNow;
-            foreach (var noti in unreadList)
+            // Trước đây không lọc theo user_id — mỗi lần Admin bấm "đánh dấu đã đọc tất cả" trên Web
+            // Admin sẽ load + update TOÀN BỘ thông báo chưa đọc của MỌI người dùng trong hệ thống (cả
+            // bệnh nhân), vừa sai logic (đánh dấu đã đọc hộ người khác) vừa là query không giới hạn
+            // nặng nhất trong toàn bộ backend. Giờ chỉ đánh dấu thông báo của chính người gọi API.
+            var claimIdStr = User.FindFirst(ClaimTypes.NameIdentifier)?.Value ?? User.FindFirst("user_id")?.Value;
+            if (string.IsNullOrWhiteSpace(claimIdStr) || !Guid.TryParse(claimIdStr, out var callerUserId))
             {
-                noti.IsRead = true;
-                noti.ReadAt = now;
+                return BadRequest(new { success = false, message = "Không xác định được người dùng gọi API." });
             }
 
-            if (unreadList.Count > 0)
-            {
-                await _context.SaveChangesAsync();
-            }
+            var count = await _context.Notifications
+                .Where(n => !n.IsRead && n.UserId == callerUserId)
+                .ExecuteUpdateAsync(setters => setters
+                    .SetProperty(n => n.IsRead, true)
+                    .SetProperty(n => n.ReadAt, DateTime.UtcNow));
 
-            return Ok(new { success = true, message = $"Đã đánh dấu đã đọc {unreadList.Count} thông báo.", count = unreadList.Count });
+            return Ok(new { success = true, message = $"Đã đánh dấu đã đọc {count} thông báo.", count });
         }
         catch (Exception ex)
         {

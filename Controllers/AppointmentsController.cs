@@ -676,19 +676,21 @@ public class AppointmentsController : ControllerBase
         if (list == null || list.Count == 0) return result;
 
         var doctorIds = list.Select(a => a.DoctorId).Distinct().ToList();
-        var doctors = await _context.Doctors.Where(d => doctorIds.Contains(d.DoctorId)).ToDictionaryAsync(d => d.DoctorId);
+        // AsNoTracking — đây đều là lookup read-only để build DTO trả về, không có gì được ghi lại
+        // vào các dictionary này trong cùng request, nên EF change-tracking chỉ tốn CPU/bộ nhớ vô ích.
+        var doctors = await _context.Doctors.AsNoTracking().Where(d => doctorIds.Contains(d.DoctorId)).ToDictionaryAsync(d => d.DoctorId);
 
         var patientIds = list.Select(a => a.PatientId).Distinct().ToList();
-        var patients = await _context.Patients.Where(p => patientIds.Contains(p.PatientId)).ToDictionaryAsync(p => p.PatientId);
+        var patients = await _context.Patients.AsNoTracking().Where(p => patientIds.Contains(p.PatientId)).ToDictionaryAsync(p => p.PatientId);
 
         var specialtyIds = doctors.Values.Where(d => d.SpecialtyId.HasValue).Select(d => d.SpecialtyId!.Value).Distinct().ToList();
-        var specialties = await _context.Specialties.Where(s => specialtyIds.Contains(s.SpecialtyId)).ToDictionaryAsync(s => s.SpecialtyId);
+        var specialties = await _context.Specialties.AsNoTracking().Where(s => specialtyIds.Contains(s.SpecialtyId)).ToDictionaryAsync(s => s.SpecialtyId);
 
         var apptIds = list.Select(a => a.AppointmentId).ToList();
-        var invoiceMap = await _context.Invoices.Where(i => apptIds.Contains(i.AppointmentId)).ToDictionaryAsync(i => i.AppointmentId);
+        var invoiceMap = await _context.Invoices.AsNoTracking().Where(i => apptIds.Contains(i.AppointmentId)).ToDictionaryAsync(i => i.AppointmentId);
 
         var cancellerUserIds = list.Where(a => a.CancelledBy.HasValue && a.CancelledBy.Value != Guid.Empty).Select(a => a.CancelledBy!.Value).Distinct().ToList();
-        var cancellerUserMap = await _context.Users.Where(u => cancellerUserIds.Contains(u.UserId)).ToDictionaryAsync(u => u.UserId);
+        var cancellerUserMap = await _context.Users.AsNoTracking().Where(u => cancellerUserIds.Contains(u.UserId)).ToDictionaryAsync(u => u.UserId);
 
         foreach (var appt in list)
         {

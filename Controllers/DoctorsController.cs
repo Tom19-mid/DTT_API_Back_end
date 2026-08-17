@@ -156,16 +156,18 @@ public class DoctorsController : ControllerBase
             query = query.Where(d => string.IsNullOrEmpty(d.Status) || d.Status == "Active");
         }
 
-        var allDoctorIds = await _context.Doctors.Select(d => d.DoctorId).ToListAsync();
+        // Lấy doctors trước rồi mới suy ra doctorIds từ kết quả trong bộ nhớ, thay vì quét lại toàn
+        // bộ bảng Doctors 1 lần nữa chỉ để lấy danh sách ID (trước đây quét bảng Doctors 2 lần/request).
+        var doctors = await query.ToListAsync();
+        var doctorIds = doctors.Select(d => d.DoctorId).ToList();
         var leavesList = await _context.DoctorLeaves
-            .Where(l => allDoctorIds.Contains(l.DoctorId))
+            .AsNoTracking()
+            .Where(l => doctorIds.Contains(l.DoctorId))
             .OrderByDescending(l => l.CreatedAt)
             .ToListAsync();
         var leavesDict = leavesList
             .GroupBy(l => l.DoctorId)
             .ToDictionary(g => g.Key, g => g.First());
-
-        var doctors = await query.ToListAsync();
 
         var today = DateOnly.FromDateTime(DateTime.Today);
 

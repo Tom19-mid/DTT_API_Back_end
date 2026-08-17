@@ -1,6 +1,7 @@
 using System.Text;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.AspNetCore.Authorization;
+using Microsoft.AspNetCore.ResponseCompression;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.IdentityModel.Tokens;
 using Microsoft.OpenApi.Models;
@@ -13,6 +14,16 @@ var builder = WebApplication.CreateBuilder(args);
 AppContext.SetSwitch("Npgsql.EnableLegacyTimestampBehavior", true);
 
 // Add Services
+// Nén response (gzip/brotli) — nhiều endpoint list (medicines, doctors, appointments) trả JSON
+// khá nặng (field bị lặp cả camelCase lẫn PascalCase), nén giúp giảm băng thông đáng kể cho
+// Mobile dùng mạng di động mà không cần đổi code từng controller.
+builder.Services.AddResponseCompression(options =>
+{
+    options.EnableForHttps = true;
+    options.Providers.Add<BrotliCompressionProvider>();
+    options.Providers.Add<GzipCompressionProvider>();
+});
+
 builder.Services.AddControllers();
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen(options =>
@@ -128,6 +139,7 @@ builder.Services.AddCors(options =>
 });
 
 var app = builder.Build();
+app.UseResponseCompression();
 app.UseSwagger();
 app.UseSwaggerUI(c =>
 {
