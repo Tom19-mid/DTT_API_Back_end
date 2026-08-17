@@ -131,9 +131,11 @@ public class HealthPackagesController : ControllerBase
                 try { await _context.SaveChangesAsync(); } catch { }
             }
 
-            // 2. Validate patient exists in PostgreSQL or fallback to default existing patient
+            // 2. Validate patient exists in PostgreSQL
             var patient = await _context.Patients.FirstOrDefaultAsync(p => p.PatientId == req.PatientId);
-            int validPatientId = patient?.PatientId ?? (await _context.Patients.FirstOrDefaultAsync())?.PatientId ?? 1;
+            if (patient == null)
+                return BadRequest(new { message = "Không tìm thấy bệnh nhân." });
+            int validPatientId = patient.PatientId;
 
             // 3. Obtain target specialty & doctor matching the health package domain
             int targetSpecialtyId = 1;
@@ -152,7 +154,9 @@ public class HealthPackagesController : ControllerBase
                               ?? await _context.Doctors.FirstOrDefaultAsync(d => d.SpecialtyId == targetSpecialtyId)
                               ?? await _context.Doctors.FirstOrDefaultAsync(d => d.Status == "Active")
                               ?? await _context.Doctors.FirstOrDefaultAsync();
-            int validDoctorId = matchedDoctor?.DoctorId ?? 1;
+            if (matchedDoctor == null)
+                return BadRequest(new { message = "Không tìm thấy bác sĩ phù hợp để xếp lịch." });
+            int validDoctorId = matchedDoctor.DoctorId;
 
             // 4. Safely get a valid, unbooked slot_id from doctor_schedule_slots table
             int validSlotId = 0;
@@ -162,13 +166,13 @@ public class HealthPackagesController : ControllerBase
                 if (conn.State != ConnectionState.Open) await conn.OpenAsync();
 
                 using var slotCmd = conn.CreateCommand();
-                slotCmd.CommandText = "SELECT s.slot_id FROM doctor_schedule_slots s JOIN doctor_schedules ds ON s.schedule_id = ds.schedule_id WHERE ds.doctor_id = " + validDoctorId + " AND s.slot_id NOT IN (SELECT slot_id FROM appointments WHERE slot_id IS NOT NULL) LIMIT 1";
+                slotCmd.CommandText = "SELECT s.slot_id FROM doctor_schedule_slots s JOIN doctor_schedules ds ON s.schedule_id = ds.schedule_id WHERE ds.doctor_id = " + validDoctorId + " AND s.status = 'Available' AND s.slot_id NOT IN (SELECT slot_id FROM appointments WHERE slot_id IS NOT NULL) LIMIT 1";
                 var val = await slotCmd.ExecuteScalarAsync();
                 if (val != null && val != DBNull.Value) validSlotId = Convert.ToInt32(val);
                 if (validSlotId == 0)
                 {
                     using var anySlot = conn.CreateCommand();
-                    anySlot.CommandText = "SELECT slot_id FROM doctor_schedule_slots WHERE slot_id NOT IN (SELECT slot_id FROM appointments WHERE slot_id IS NOT NULL) LIMIT 1";
+                    anySlot.CommandText = "SELECT slot_id FROM doctor_schedule_slots WHERE status = 'Available' AND slot_id NOT IN (SELECT slot_id FROM appointments WHERE slot_id IS NOT NULL) LIMIT 1";
                     var val2 = await anySlot.ExecuteScalarAsync();
                     if (val2 != null && val2 != DBNull.Value) validSlotId = Convert.ToInt32(val2);
                 }

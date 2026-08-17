@@ -105,38 +105,57 @@ public class NotificationsController : ControllerBase
                 return BadRequest(new { success = false, message = "Tiêu đề và nội dung thông báo không được để trống." });
             }
 
-            Guid targetUserId = Guid.Empty;
+            Guid? targetUserId = null;
             if (!string.IsNullOrWhiteSpace(dto.UserId) && Guid.TryParse(dto.UserId, out var parsedGuid))
             {
                 targetUserId = parsedGuid;
             }
-            else
-            {
-                /*
-                // Code cũ tự gán cho user đầu tiên trong CSDL:
-                var defaultUser = await _context.Users.FirstOrDefaultAsync();
-                if (defaultUser != null) targetUserId = defaultUser.UserId;
-                */
-                var claimIdStr = User.FindFirst(ClaimTypes.NameIdentifier)?.Value ?? User.FindFirst("user_id")?.Value;
-                if (!string.IsNullOrWhiteSpace(claimIdStr) && Guid.TryParse(claimIdStr, out var parsedAdminId))
-                {
-                    targetUserId = parsedAdminId;
-                }
-                else
-                {
-                    var defaultUser = await _context.Users.FirstOrDefaultAsync();
-                    if (defaultUser != null) targetUserId = defaultUser.UserId;
-                }
-            }
 
-            if (targetUserId == Guid.Empty)
+            // Trước đây khi không chỉ định UserId, code tự gán thông báo cho CHÍNH Admin đang đăng
+            // nhập (đọc claim của người gọi API) — vì màn "Tạo thông báo" trên Web Admin không có ô
+            // chọn người nhận (nhãn ghi "Phát thông báo tới người dùng hệ thống"), mọi thông báo tạo ra
+            // từ trước tới giờ chỉ đến được chính tài khoản Admin, KHÔNG BAO GIỜ tới bệnh nhân nào —
+            // tính năng phát thông báo trên thực tế chưa hoạt động. Sửa lại đúng ý định: không chỉ định
+            // UserId cụ thể = phát cho TẤT CẢ bệnh nhân đang hoạt động (mirror cách
+            // ChatController.EscalateSession fan-out 1 dòng Notification cho mỗi lễ tân).
+            if (targetUserId == null)
             {
-                return BadRequest(new { success = false, message = "Không tìm thấy người dùng hợp lệ để gửi thông báo." });
+                var activePatientUserIds = await _context.Patients
+                    .Join(_context.Users.Where(u => u.RoleId == 3 && u.Status == "Active"),
+                          p => p.UserId, u => u.UserId, (p, u) => u.UserId)
+                    .Distinct()
+                    .ToListAsync();
+
+                if (activePatientUserIds.Count == 0)
+                    return BadRequest(new { success = false, message = "Không có bệnh nhân nào để phát thông báo." });
+
+                var now = DateTime.UtcNow;
+                var broadcastNotifications = activePatientUserIds.Select(uid => new Notification
+                {
+                    UserId = uid,
+                    Title = dto.Title.Trim(),
+                    Content = dto.Content.Trim(),
+                    Type = string.IsNullOrWhiteSpace(dto.Type) ? "system" : dto.Type.Trim(),
+                    RelatedId = dto.RelatedId,
+                    RelatedType = dto.RelatedType,
+                    IsRead = false,
+                    CreatedAt = now
+                }).ToList();
+
+                _context.Notifications.AddRange(broadcastNotifications);
+                await _context.SaveChangesAsync();
+
+                return Ok(new
+                {
+                    success = true,
+                    message = $"Đã phát thông báo tới {broadcastNotifications.Count} bệnh nhân.",
+                    data = new { broadcastCount = broadcastNotifications.Count }
+                });
             }
 
             var notification = new Notification
             {
-                UserId = targetUserId,
+                UserId = targetUserId.Value,
                 Title = dto.Title.Trim(),
                 Content = dto.Content.Trim(),
                 Type = string.IsNullOrWhiteSpace(dto.Type) ? "system" : dto.Type.Trim(),

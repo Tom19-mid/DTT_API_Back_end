@@ -61,6 +61,11 @@ public class AppointmentsController : ControllerBase
             var doctor = await _context.Doctors.FirstOrDefaultAsync(d => d.DoctorId == dto.DoctorId);
             if (doctor == null)
                 return BadRequest(new { success = false, message = $"Không tìm thấy bác sĩ với DoctorId={dto.DoctorId}." });
+            // Chặn đặt lịch với bác sĩ đang Nghỉ phép/Khóa/Ngưng hoạt động — trước đây không check gì,
+            // nên đơn nghỉ phép được duyệt qua Web Admin (DoctorLeavesController) không thực sự ngăn
+            // được bệnh nhân đặt lịch với bác sĩ đó.
+            if (!string.IsNullOrEmpty(doctor.Status) && doctor.Status != "Active")
+                return BadRequest(new { success = false, message = "Bác sĩ hiện không nhận lịch khám (đang nghỉ phép hoặc ngưng hoạt động). Vui lòng chọn bác sĩ khác." });
             int validDoctorId = doctor.DoctorId;
 
             // 4. Safely query or create a valid slot_id in PostgreSQL doctor_schedule_slots table
@@ -72,10 +77,11 @@ public class AppointmentsController : ControllerBase
 
                 using var cmd1 = conn.CreateCommand();
                 cmd1.CommandText = @"
-                    SELECT s.slot_id 
+                    SELECT s.slot_id
                     FROM doctor_schedule_slots s
                     JOIN doctor_schedules ds ON s.schedule_id = ds.schedule_id
-                    WHERE ds.doctor_id = @dId AND s.slot_id NOT IN (SELECT slot_id FROM appointments WHERE slot_id IS NOT NULL)
+                    WHERE ds.doctor_id = @dId AND s.status = 'Available'
+                      AND s.slot_id NOT IN (SELECT slot_id FROM appointments WHERE slot_id IS NOT NULL)
                     LIMIT 1";
                 var pId1 = cmd1.CreateParameter(); pId1.ParameterName = "@dId"; pId1.Value = validDoctorId; cmd1.Parameters.Add(pId1);
 
@@ -126,7 +132,7 @@ public class AppointmentsController : ControllerBase
                     var conn2 = _context.Database.GetDbConnection();
                     if (conn2.State != ConnectionState.Open) await conn2.OpenAsync();
                     using var anyCmd = conn2.CreateCommand();
-                    anyCmd.CommandText = "SELECT slot_id FROM doctor_schedule_slots WHERE slot_id NOT IN (SELECT slot_id FROM appointments WHERE slot_id IS NOT NULL) LIMIT 1";
+                    anyCmd.CommandText = "SELECT slot_id FROM doctor_schedule_slots WHERE status = 'Available' AND slot_id NOT IN (SELECT slot_id FROM appointments WHERE slot_id IS NOT NULL) LIMIT 1";
                     var valAny = await anyCmd.ExecuteScalarAsync();
                     if (valAny != null && valAny != DBNull.Value) slotId = Convert.ToInt32(valAny);
                     if (slotId <= 0)
@@ -363,7 +369,17 @@ public class AppointmentsController : ControllerBase
             if (dto.DoctorId > 0) appt.DoctorId = dto.DoctorId;
             if (dto.PatientId > 0) appt.PatientId = dto.PatientId;
             if (!string.IsNullOrEmpty(dto.Reason)) appt.Reason = dto.Reason;
-            if (dto.StatusId > 0) appt.StatusId = dto.StatusId;
+            if (dto.StatusId > 0)
+            {
+                // StatusId=4 (Completed) KHÔNG được set qua đường sửa chung này — trạng thái này chỉ
+                // hợp lệ khi đi kèm hồ sơ khám/hóa đơn thật, được tạo bởi MedicalRecordsController khi
+                // bác sĩ hoàn tất khám. Set trực tiếp ở đây (vd: từ Web Admin) sẽ để lại lịch hẹn
+                // "Completed" không có hồ sơ khám lẫn hóa đơn dịch vụ nào — làm màn thu ngân WinForms
+                // hiện hóa đơn ảo. Chặn ở đây, hướng đúng qua luồng hoàn tất khám thật.
+                if (dto.StatusId == 4)
+                    return BadRequest(new { success = false, message = "Không thể đặt trực tiếp trạng thái 'Đã hoàn thành' — trạng thái này chỉ được set khi bác sĩ hoàn tất khám (tạo hồ sơ khám và hóa đơn)." });
+                appt.StatusId = dto.StatusId;
+            }
 
             // Note (Ghi chú) - Ưu tiên lấy ghi chú tùy chỉnh từ frontend
             var customNote = dto.Note ?? dto.Notes;
@@ -402,6 +418,12 @@ public class AppointmentsController : ControllerBase
                 var cancellerGuid = await ResolveCancellerUserIdAsync(dto.CancelledBy ?? "Lễ tân", appt.PatientId, appt.DoctorId);
                 if (cancellerGuid.HasValue) appt.CancelledBy = cancellerGuid.Value;
                 if (!appt.CancelledAt.HasValue) appt.CancelledAt = DateTime.UtcNow;
+
+                if (dto.StatusId == 5)
+                {
+                    // Cùng lý do như CancelAppointment — dọn hóa đơn "unpaid" mồ côi, giữ nguyên partial/paid.
+                    await VoidUnpaidInvoiceForAppointmentAsync(id);
+                }
             }
 
             if (dto.NurseNote != null)
@@ -558,6 +580,30 @@ public class AppointmentsController : ControllerBase
         catch (Exception ex)
         {
             return StatusCode(500, new { success = false, message = ex.Message });
+        }
+    }
+
+    // Xóa hóa đơn (+ các dòng InvoiceItem) còn "unpaid" gắn với 1 lịch hẹn vừa bị Hủy — không có dịch
+    // vụ nào thực sự diễn ra nên không có gì để thu tiền. Hóa đơn "partial"/"paid" (đã có tiền thật)
+    // được GIỮ NGUYÊN, không tự động xóa dữ liệu tài chính đã phát sinh.
+    private async Task VoidUnpaidInvoiceForAppointmentAsync(int appointmentId)
+    {
+        try
+        {
+            var invoices = await _context.Invoices
+                .Where(inv => inv.AppointmentId == appointmentId && inv.PaymentStatus == "unpaid")
+                .ToListAsync();
+            if (invoices.Count == 0) return;
+
+            var invoiceIds = invoices.Select(inv => inv.InvoiceId).ToList();
+            var items = await _context.InvoiceItems.Where(it => invoiceIds.Contains(it.InvoiceId)).ToListAsync();
+            _context.InvoiceItems.RemoveRange(items);
+            _context.Invoices.RemoveRange(invoices);
+            await _context.SaveChangesAsync();
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"VoidUnpaidInvoiceForAppointmentAsync warning (appointmentId={appointmentId}): {ex.Message}");
         }
     }
 
@@ -841,6 +887,12 @@ public class AppointmentsController : ControllerBase
                 */
 
                 appt.CancelReason = !string.IsNullOrEmpty(req?.CancelReason) ? req.CancelReason : "Hủy lịch hẹn";
+
+                // Dọn hóa đơn "unpaid" mồ côi khi hủy lịch hẹn — trước đây hủy lịch không đụng gì tới
+                // Invoices/InvoiceItems, để lại hóa đơn chưa thanh toán trỏ vào 1 lịch hẹn đã Hủy, hiện
+                // mãi trên màn thu ngân WinForms. Hóa đơn đã partial/paid (đã có tiền thật) thì GIỮ
+                // NGUYÊN, không tự động xóa — cần nhân viên xử lý hoàn tiền thủ công.
+                await VoidUnpaidInvoiceForAppointmentAsync(id);
 
                 // Save real UUID user_id into CancelledBy column in PostgreSQL database
                 var cancellerGuid = await ResolveCancellerUserIdAsync(req?.CancelledBy, appt.PatientId, appt.DoctorId);

@@ -511,7 +511,7 @@ public class WorkSchedulesController : ControllerBase
                 if (obj != null && obj != DBNull.Value) currentStatus = Convert.ToString(obj) ?? "Available";
             }
 
-            bool isCurrentlyLocked = currentStatus == "Off" || currentStatus == "Không hoạt động";
+            bool isCurrentlyLocked = currentStatus == "Off" || currentStatus == "Unavailable" || currentStatus == "Không hoạt động";
             bool lockAction = !isCurrentlyLocked;
 
             if (dto?.IsLocked.HasValue == true)

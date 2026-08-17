@@ -136,7 +136,14 @@ public class MedicinesController : ControllerBase
             var categoriesMap = await _context.MedicineCategories.AsNoTracking()
                 .ToDictionaryAsync(c => c.CategoryId, c => c.CategoryName);
 
-            var medicinesList = await _context.Medicines.AsNoTracking()
+            // Chỉ Admin (web admin) mới thấy thuốc Inactive để quản lý/kích hoạt lại; các role khác
+            // (vd: bác sĩ kê đơn trên WinForms) chỉ thấy thuốc đang bán — giữ đúng hành vi lọc gốc,
+            // tránh kê nhầm thuốc đã ngưng bán (quy hồi sau khi API này được mở rộng cho web admin).
+            var medsQuery = _context.Medicines.AsNoTracking().AsQueryable();
+            bool isAdmin = User.FindFirst("role_id")?.Value == "1";
+            if (!isAdmin) medsQuery = medsQuery.Where(m => m.Status == "Active");
+
+            var medicinesList = await medsQuery
                 .OrderByDescending(m => m.MedicineId)
                 .ToListAsync();
 

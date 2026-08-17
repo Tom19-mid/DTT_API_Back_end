@@ -147,6 +147,15 @@ public class DoctorsController : ControllerBase
             query = query.Where(d => d.SpecialtyId == specialtyId.Value);
         }
 
+        // Chỉ Admin (Web Admin, quản lý toàn bộ bác sĩ kể cả Khóa/Nghỉ phép) mới thấy đủ mọi trạng
+        // thái; các caller khác (Mobile đặt lịch) chỉ thấy bác sĩ Active — trước đây không lọc gì,
+        // nên bác sĩ đang Nghỉ phép/Khóa vẫn hiện ra để bệnh nhân chọn đặt lịch trên Mobile.
+        bool isAdminCaller = User.FindFirst("role_id")?.Value == "1";
+        if (!isAdminCaller)
+        {
+            query = query.Where(d => string.IsNullOrEmpty(d.Status) || d.Status == "Active");
+        }
+
         var allDoctorIds = await _context.Doctors.Select(d => d.DoctorId).ToListAsync();
         var leavesList = await _context.DoctorLeaves
             .Where(l => allDoctorIds.Contains(l.DoctorId))
@@ -354,6 +363,12 @@ public class DoctorsController : ControllerBase
 
             _context.Doctors.Add(newDoctor);
             await _context.SaveChangesAsync();
+
+            // Sinh sẵn lịch làm việc thật (doctor_schedules/doctor_schedule_slots) cho 7 ngày tới —
+            // trước đây bác sĩ tạo qua Admin không có lịch nào (SeedDoctorSchedulesAsync chỉ chạy 1
+            // lần/vòng đời app, không áp dụng cho bác sĩ tạo sau đó), nên Mobile phải hiện giờ khám giả
+            // (GenerateDoctorTimeSlots) và đặt lịch chỉ tạo được đúng 1 slot fallback rồi hết.
+            await SeedInitialScheduleForNewDoctorAsync(newDoctor.DoctorId);
 
             if (normDocStatus == "OnLeave" || !string.IsNullOrWhiteSpace(dto.LeaveStartDate))
             {
@@ -735,6 +750,67 @@ public class DoctorsController : ControllerBase
             case 0: // Group D: Wed, Thu, Fri, Sat
             default:
                 return dow == DayOfWeek.Wednesday || dow == DayOfWeek.Thursday || dow == DayOfWeek.Friday || dow == DayOfWeek.Saturday;
+        }
+    }
+
+    // Sinh lịch làm việc thật (7 ngày tới, Thứ Hai-Thứ Bảy, 08:00-17:00, slot 30 phút) cho 1 bác sĩ
+    // vừa tạo — cùng format/status với WorkSchedulesController.CreateSchedule (đã xác nhận khớp với
+    // logic đặt lịch), để Mobile/booking đọc được slot thật ngay từ đầu thay vì giờ khám giả.
+    private async Task SeedInitialScheduleForNewDoctorAsync(int doctorId)
+    {
+        try
+        {
+            var conn = _context.Database.GetDbConnection();
+            if (conn.State != ConnectionState.Open) await conn.OpenAsync();
+
+            var startTime = new TimeSpan(8, 0, 0);
+            var endTime = new TimeSpan(17, 0, 0);
+            var slotDuration = TimeSpan.FromMinutes(30);
+            var today = DateTime.Today;
+
+            for (int dayOffset = 0; dayOffset < 7; dayOffset++)
+            {
+                var workDate = today.AddDays(dayOffset);
+                if (workDate.DayOfWeek == DayOfWeek.Sunday) continue; // Thứ Hai-Thứ Bảy, giống WorkingDaysText mặc định
+
+                int scheduleId;
+                using (var cmd = conn.CreateCommand())
+                {
+                    cmd.CommandText = @"
+                        INSERT INTO doctor_schedules (doctor_id, work_date, start_time, end_time, status, created_at, updated_at)
+                        VALUES (@docId, @wDate, @sTime, @eTime, 'Available', NOW(), NOW())
+                        RETURNING schedule_id;";
+                    var p1 = cmd.CreateParameter(); p1.ParameterName = "@docId"; p1.Value = doctorId; cmd.Parameters.Add(p1);
+                    var p2 = cmd.CreateParameter(); p2.ParameterName = "@wDate"; p2.Value = workDate.Date; cmd.Parameters.Add(p2);
+                    var p3 = cmd.CreateParameter(); p3.ParameterName = "@sTime"; p3.Value = startTime; cmd.Parameters.Add(p3);
+                    var p4 = cmd.CreateParameter(); p4.ParameterName = "@eTime"; p4.Value = endTime; cmd.Parameters.Add(p4);
+                    scheduleId = Convert.ToInt32(await cmd.ExecuteScalarAsync());
+                }
+
+                int slotOrder = 1;
+                var currSlotStart = startTime;
+                while (currSlotStart + slotDuration <= endTime)
+                {
+                    var currSlotEnd = currSlotStart + slotDuration;
+                    using (var slotCmd = conn.CreateCommand())
+                    {
+                        slotCmd.CommandText = @"
+                            INSERT INTO doctor_schedule_slots (schedule_id, slot_order, start_time, end_time, status, created_at, updated_at)
+                            VALUES (@schId, @sOrder, @sTime, @eTime, 'Available', NOW(), NOW());";
+                        var sp1 = slotCmd.CreateParameter(); sp1.ParameterName = "@schId"; sp1.Value = scheduleId; slotCmd.Parameters.Add(sp1);
+                        var sp2 = slotCmd.CreateParameter(); sp2.ParameterName = "@sOrder"; sp2.Value = slotOrder; slotCmd.Parameters.Add(sp2);
+                        var sp3 = slotCmd.CreateParameter(); sp3.ParameterName = "@sTime"; sp3.Value = currSlotStart; slotCmd.Parameters.Add(sp3);
+                        var sp4 = slotCmd.CreateParameter(); sp4.ParameterName = "@eTime"; sp4.Value = currSlotEnd; slotCmd.Parameters.Add(sp4);
+                        await slotCmd.ExecuteNonQueryAsync();
+                    }
+                    slotOrder++;
+                    currSlotStart = currSlotEnd;
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"SeedInitialScheduleForNewDoctorAsync warning (doctorId={doctorId}): {ex.Message}");
         }
     }
 

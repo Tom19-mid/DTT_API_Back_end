@@ -344,11 +344,15 @@ public class SpecialtiesController : ControllerBase
 
             var specDict = specialties.ToDictionary(s => s.SpecialtyId, s => s.SpecialtyName);
 
-            var result = doctors.Select(d =>
+            // Loại bỏ bác sĩ thuộc chuyên khoa đã bị Admin vô hiệu hoá — trước đây không lọc, nên bác sĩ
+            // đó vẫn hiện ra để chọn nhưng bị gắn nhầm nhãn "Nội tổng quát" thay vì bị ẩn đi.
+            var doctorsWithActiveSpecialty = doctors
+                .Where(d => d.SpecialtyId.HasValue && specDict.ContainsKey(d.SpecialtyId.Value))
+                .ToList();
+
+            var result = doctorsWithActiveSpecialty.Select(d =>
             {
-                string specName = d.SpecialtyId.HasValue && specDict.ContainsKey(d.SpecialtyId.Value)
-                    ? specDict[d.SpecialtyId.Value]
-                    : "Nội tổng quát";
+                string specName = specDict[d.SpecialtyId!.Value];
                 string degree = !string.IsNullOrEmpty(d.Degree) ? d.Degree : "BS.";
                 string displayName = $"{specName} ({degree} {d.FullName})";
                 return new
