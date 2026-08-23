@@ -182,7 +182,43 @@ public class FamilyMembersController : ControllerBase
                 if (dto.Phone != null) member.PhoneNumber = dto.Phone;
                 if (dto.Cccd != null) member.CccdNumber = dto.Cccd;
                 if (dto.Bhyt != null) member.HealthInsuranceNumber = dto.Bhyt;
+                if (!string.IsNullOrWhiteSpace(dto.Address)) member.Address = dto.Address;
                 if (TryParseDate(dto.Dob, out var parsedMemberDob)) member.DateOfBirth = parsedMemberDob;
+
+                // [NEW CODE] Cập nhật VerificationStatus, VerificationNote, VerifiedAt, VerifiedBy cho FamilyMember
+                if (!string.IsNullOrWhiteSpace(dto.VerificationStatus))
+                {
+                    string statusLower = dto.VerificationStatus.ToLower().Trim();
+                    if (statusLower == "đã duyệt" || statusLower == "verified")
+                    {
+                        member.VerificationStatus = "verified";
+                        var rawVerifiedAt = dto.VerifiedAt ?? DateTime.UtcNow;
+                        member.VerifiedAt = DateTime.SpecifyKind(rawVerifiedAt, DateTimeKind.Utc);
+                    }
+                    else if (statusLower == "từ chối" || statusLower == "rejected")
+                    {
+                        member.VerificationStatus = "rejected";
+                        var rawVerifiedAt = dto.VerifiedAt ?? DateTime.UtcNow;
+                        member.VerifiedAt = DateTime.SpecifyKind(rawVerifiedAt, DateTimeKind.Utc);
+                    }
+                    else
+                    {
+                        member.VerificationStatus = "pending";
+                        member.VerifiedAt = null;
+                    }
+                }
+
+                if (dto.VerificationNote != null)
+                {
+                    member.VerificationNote = dto.VerificationNote;
+                }
+
+                var receptionistUser = await _context.Users.FirstOrDefaultAsync(u => u.RoleId == 4 || (u.FullName != null && (u.FullName.ToLower().Contains("lễ") || u.FullName.ToLower().Contains("tân") || u.FullName.ToLower().Contains("reception"))));
+                if (receptionistUser != null)
+                {
+                    member.VerifiedBy = receptionistUser.UserId;
+                }
+
                 member.UpdatedAt = DateTime.UtcNow;
 
                 await _context.SaveChangesAsync();
@@ -338,4 +374,9 @@ public class UpdateFamilyMemberDto
     public string? Phone { get; set; }
     public string? Cccd { get; set; }
     public string? Bhyt { get; set; }
+    public string? Address { get; set; }
+    public string? VerificationStatus { get; set; }
+    public string? VerificationNote { get; set; }
+    public DateTime? VerifiedAt { get; set; }
+    public string? VerifiedBy { get; set; }
 }

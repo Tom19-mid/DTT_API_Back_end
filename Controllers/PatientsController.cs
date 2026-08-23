@@ -201,7 +201,9 @@ public class PatientsController : ControllerBase
                     VerifiedBy = m.VerifiedBy.HasValue ? "Lễ tân" : null,
                     VerificationNote = m.VerificationNote,
                     UpdatedAt = m.UpdatedAt,
-                    Status = u != null ? (u.Status ?? "Active") : "Active"
+                    Status = u != null ? (u.Status ?? "Active") : "Active",
+                    OwnerPatientId = m.OwnerPatientId,
+                    OwnerFullName = owner != null ? owner.FullName : null
                 })
                 .ToListAsync();
 
@@ -353,15 +355,17 @@ public class PatientsController : ControllerBase
         try
         {
             Guid? currentUserId = GetCurrentUserId();
+            // [NEW CODE] Kiểm tra bảng FamilyMembers trước nếu id thuộc về FamilyMembers
+            var mCheck = await _context.FamilyMembers.FirstOrDefaultAsync(x => x.MemberId == id);
+            var p = mCheck == null ? await _context.Patients.FirstOrDefaultAsync(x => x.PatientId == id) : null;
+            /* [OLD CODE COMMENTED OUT — chỉ kiểm tra Patients trước làm ghi đè sai nếu id trùng]
             var p = await _context.Patients.FirstOrDefaultAsync(x => x.PatientId == id);
-            /* [OLD CODE COMMENTED OUT — trả 404 ngay nếu không tìm thấy trong Patients, chưa kiểm tra FamilyMembers]
-            if (p == null) return NotFound(new { success = false, message = "Không tìm thấy hồ sơ bệnh nhân." });
             */
 
-            // [NEW FALLBACK CODE] Nếu không tìm thấy trong bảng Patients, kiểm tra tiếp trong bảng FamilyMembers
-            if (p == null)
+            // [NEW FALLBACK CODE] Nếu tìm thấy trong bảng FamilyMembers
+            if (mCheck != null || p == null)
             {
-                var m = await _context.FamilyMembers.FirstOrDefaultAsync(x => x.MemberId == id);
+                var m = mCheck ?? await _context.FamilyMembers.FirstOrDefaultAsync(x => x.MemberId == id);
                 if (m == null) return NotFound(new { success = false, message = "Không tìm thấy hồ sơ bệnh nhân hoặc người thân." });
 
                 if (!string.IsNullOrWhiteSpace(dto.FullName)) m.FullName = dto.FullName;
@@ -883,4 +887,6 @@ public class ReceptionProfileDto
     public string? VerificationNote { get; set; }
     public DateTime? UpdatedAt { get; set; }
     public string Status { get; set; } = "Active";
+    public int? OwnerPatientId { get; set; }
+    public string? OwnerFullName { get; set; }
 }
