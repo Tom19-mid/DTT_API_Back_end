@@ -1,7 +1,9 @@
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.SignalR;
 using Microsoft.EntityFrameworkCore;
 using DTT_Backend_API.Data;
 using DTT_Backend_API.Helpers;
+using DTT_Backend_API.Hubs;
 using DTT_Backend_API.Models;
 using System.Linq;
 
@@ -12,10 +14,12 @@ namespace DTT_Backend_API.Controllers;
 public class PatientsController : ControllerBase
 {
     private readonly AppDbContext _context;
+    private readonly IHubContext<NotificationHub> _hub;
 
-    public PatientsController(AppDbContext context)
+    public PatientsController(AppDbContext context, IHubContext<NotificationHub> hub)
     {
         _context = context;
+        _hub = hub;
     }
 
     // GET /api/patients — List all patients + hồ sơ người thân (family_members) chờ xác thực CCCD tại quầy
@@ -576,6 +580,15 @@ public class PatientsController : ControllerBase
 
             await _context.SaveChangesAsync();
 
+            if (!string.IsNullOrWhiteSpace(dto.VerificationStatus))
+            {
+                try
+                {
+                    await _hub.Clients.Group($"user:{p.UserId}").SendAsync("VerificationStatusChanged", new { verificationStatus = p.VerificationStatus });
+                }
+                catch { /* real-time push failure should not block the main update response */ }
+            }
+
             return Ok(new
             {
                 success = true,
@@ -660,6 +673,12 @@ public class PatientsController : ControllerBase
             {
                 // Notification failure should not block the main verify response
             }
+
+            try
+            {
+                await _hub.Clients.Group($"user:{p.UserId}").SendAsync("VerificationStatusChanged", new { verificationStatus = "verified" });
+            }
+            catch { /* real-time push failure should not block the main verify response */ }
 
             return Ok(new
             {

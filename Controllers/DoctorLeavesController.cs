@@ -361,8 +361,11 @@ public class DoctorLeavesController : ControllerBase
             {
                 newLeave.ApprovedAt = DateTime.UtcNow;
                 doctor.Status = "OnLeave";
+                // "OnLeave" (không phải "Inactive") — khớp với UpdateLeaveStatus (duyệt đơn nghỉ phép
+                // đang chờ) để cùng 1 trạng thái nghiệp vụ "bác sĩ đang nghỉ phép" không bị lưu thành
+                // 2 giá trị users.status khác nhau tùy đường tạo đơn.
                 var user = await _context.Users.FirstOrDefaultAsync(u => u.UserId == doctor.UserId);
-                if (user != null) user.Status = "Inactive";
+                if (user != null) user.Status = "OnLeave";
             }
 
             _context.DoctorLeaves.Add(newLeave);

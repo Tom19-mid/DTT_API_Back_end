@@ -6,6 +6,7 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.IdentityModel.Tokens;
 using Microsoft.OpenApi.Models;
 using DTT_Backend_API.Data;
+using DTT_Backend_API.Hubs;
 using DTT_Backend_API.Services;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -25,6 +26,7 @@ builder.Services.AddResponseCompression(options =>
 });
 
 builder.Services.AddControllers();
+builder.Services.AddSignalR();
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen(options =>
 {
@@ -116,6 +118,24 @@ builder.Services.AddAuthentication(options =>
         ValidateIssuer = false,
         ValidateAudience = false
     };
+
+    // SignalR clients gửi JWT qua query string "access_token" (chuẩn khuyến nghị của ASP.NET Core
+    // cho WebSocket/SSE transport — request upgrade không phải lúc nào cũng mang được header
+    // Authorization tùy client/transport), CHỈ áp dụng cho path /hubs/* để không nới lỏng xác thực
+    // của các endpoint REST khác.
+    options.Events = new JwtBearerEvents
+    {
+        OnMessageReceived = context =>
+        {
+            var accessToken = context.Request.Query["access_token"];
+            var path = context.HttpContext.Request.Path;
+            if (!string.IsNullOrEmpty(accessToken) && path.StartsWithSegments("/hubs"))
+            {
+                context.Token = accessToken;
+            }
+            return Task.CompletedTask;
+        }
+    };
 });
 
 // Mọi endpoint yêu cầu JWT hợp lệ theo mặc định — controller/action nào cần công khai
@@ -180,6 +200,7 @@ app.UseStaticFiles();
 app.UseAuthentication();
 app.UseAuthorization();
 app.MapControllers();
+app.MapHub<NotificationHub>("/hubs/notifications");
 
 // Health Check root endpoint: http://localhost:5000/
 app.MapGet("/", () => Results.Ok(new

@@ -68,98 +68,8 @@ public class AppointmentsController : ControllerBase
                 return BadRequest(new { success = false, message = "Bác sĩ hiện không nhận lịch khám (đang nghỉ phép hoặc ngưng hoạt động). Vui lòng chọn bác sĩ khác." });
             int validDoctorId = doctor.DoctorId;
 
-            // 4. Safely query or create a valid slot_id in PostgreSQL doctor_schedule_slots table
-            int slotId = 0;
-            try
-            {
-                var conn = _context.Database.GetDbConnection();
-                if (conn.State != ConnectionState.Open) await conn.OpenAsync();
-
-                using var cmd1 = conn.CreateCommand();
-                cmd1.CommandText = @"
-                    SELECT s.slot_id
-                    FROM doctor_schedule_slots s
-                    JOIN doctor_schedules ds ON s.schedule_id = ds.schedule_id
-                    WHERE ds.doctor_id = @dId AND s.status = 'Available'
-                      AND s.slot_id NOT IN (SELECT slot_id FROM appointments WHERE slot_id IS NOT NULL)
-                    LIMIT 1";
-                var pId1 = cmd1.CreateParameter(); pId1.ParameterName = "@dId"; pId1.Value = validDoctorId; cmd1.Parameters.Add(pId1);
-
-                var v1 = await cmd1.ExecuteScalarAsync();
-                if (v1 != null && v1 != DBNull.Value)
-                {
-                    slotId = Convert.ToInt32(v1);
-                }
-                else
-                {
-                    int scheduleId = 0;
-                    using var schedCmd = conn.CreateCommand();
-                    schedCmd.CommandText = "SELECT schedule_id FROM doctor_schedules WHERE doctor_id = @dId LIMIT 1";
-                    var pId2 = schedCmd.CreateParameter(); pId2.ParameterName = "@dId"; pId2.Value = validDoctorId; schedCmd.Parameters.Add(pId2);
-                    var sVal = await schedCmd.ExecuteScalarAsync();
-
-                    if (sVal != null && sVal != DBNull.Value)
-                    {
-                        scheduleId = Convert.ToInt32(sVal);
-                    }
-                    else
-                    {
-                        using var insSched = conn.CreateCommand();
-                        insSched.CommandText = "INSERT INTO doctor_schedules (doctor_id, work_date, start_time, end_time, status) VALUES (@dId, CURRENT_DATE, '08:00:00'::time, '12:00:00'::time, 'Available') RETURNING schedule_id";
-                        var pId3 = insSched.CreateParameter(); pId3.ParameterName = "@dId"; pId3.Value = validDoctorId; insSched.Parameters.Add(pId3);
-                        var newSched = await insSched.ExecuteScalarAsync();
-                        if (newSched != null && newSched != DBNull.Value) scheduleId = Convert.ToInt32(newSched);
-                    }
-
-                    if (scheduleId > 0)
-                    {
-                        using var insSlot = conn.CreateCommand();
-                        insSlot.CommandText = $"INSERT INTO doctor_schedule_slots (schedule_id, slot_order, start_time, end_time, status) VALUES ({scheduleId}, 1, '08:30:00'::time, '09:00:00'::time, 'Available') RETURNING slot_id";
-                        var newSlot = await insSlot.ExecuteScalarAsync();
-                        if (newSlot != null && newSlot != DBNull.Value) slotId = Convert.ToInt32(newSlot);
-                    }
-                }
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine("Schedule slot lookup warning: " + ex.Message);
-            }
-
-            if (slotId <= 0)
-            {
-                try
-                {
-                    var conn2 = _context.Database.GetDbConnection();
-                    if (conn2.State != ConnectionState.Open) await conn2.OpenAsync();
-                    using var anyCmd = conn2.CreateCommand();
-                    anyCmd.CommandText = "SELECT slot_id FROM doctor_schedule_slots WHERE status = 'Available' AND slot_id NOT IN (SELECT slot_id FROM appointments WHERE slot_id IS NOT NULL) LIMIT 1";
-                    var valAny = await anyCmd.ExecuteScalarAsync();
-                    if (valAny != null && valAny != DBNull.Value) slotId = Convert.ToInt32(valAny);
-                    if (slotId <= 0)
-                    {
-                        using var insAny = conn2.CreateCommand();
-                        insAny.CommandText = $"INSERT INTO doctor_schedules (doctor_id, work_date, start_time, end_time) VALUES ({validDoctorId}, CURRENT_DATE, '08:00:00', '12:00:00') RETURNING schedule_id";
-                        var scVal = await insAny.ExecuteScalarAsync();
-                        int scId = scVal != null && scVal != DBNull.Value ? Convert.ToInt32(scVal) : 1;
-                        using var insSl = conn2.CreateCommand();
-                        insSl.CommandText = $"INSERT INTO doctor_schedule_slots (schedule_id, slot_order, start_time, end_time, status) VALUES ({scId}, 1, '08:00:00', '08:30:00', 'Available') RETURNING slot_id";
-                        var slVal = await insSl.ExecuteScalarAsync();
-                        if (slVal != null && slVal != DBNull.Value) slotId = Convert.ToInt32(slVal);
-                    }
-                }
-                catch (Exception e2)
-                {
-                    Console.WriteLine("Fallback slot creation failed: " + e2.Message);
-                }
-            }
-            // Không còn fallback cứng slotId=1 — slot #1 có thể thuộc lịch của bác sĩ khác hoàn toàn,
-            // gán bừa vào đó sẽ làm sai lệch dữ liệu lịch hẹn (hiện đúng bác sĩ nhưng sai giờ/slot thật).
-            // Nếu cả tra cứu lẫn tự tạo slot mới đều thất bại, báo lỗi để Lễ Tân/bệnh nhân thử lại thay
-            // vì âm thầm tạo lịch hẹn với slot sai.
-            if (slotId <= 0)
-                return StatusCode(500, new { success = false, message = "Không thể tạo khung giờ khám cho bác sĩ này. Vui lòng thử lại hoặc chọn bác sĩ/giờ khác." });
-
-            // Parse ngày hẹn từ dto.Date (format d/M/yyyy hoặc yyyy-MM-dd)
+            // Parse ngày hẹn từ dto.Date (format d/M/yyyy hoặc yyyy-MM-dd) — chuyển lên TRƯỚC bước tìm
+            // slot vì slot giờ đây phải khớp đúng ngày bệnh nhân chọn, không còn lấy đại slot trống.
             DateOnly? apptDate = null;
             if (!string.IsNullOrEmpty(dto.Date))
             {
@@ -171,6 +81,97 @@ public class AppointmentsController : ControllerBase
                 }
             }
             apptDate ??= DateOnly.FromDateTime(DateTime.UtcNow.AddHours(7)); // fallback: hôm nay VN
+
+            // 4. Tìm đúng slot_id khớp bác sĩ + NGÀY + GIỜ bệnh nhân đã chọn.
+            // Trước đây bước này lấy ĐẠI 1 slot 'Available' bất kỳ của bác sĩ (không quan tâm ngày/giờ
+            // dto.TimeSlot), và nếu bác sĩ đó không còn slot trống thì lấy ĐẠI slot của BÁC SĨ KHÁC —
+            // khiến lịch hẹn tạo ra lệch hẳn so với ngày/giờ/bác sĩ mà bệnh nhân thực sự chọn trên
+            // Mobile (đúng như QA report: "ngày khám của Bác sĩ đó không có nhưng trên mobile hiện là có").
+            int slotId = 0;
+            TimeSpan? requestedStart = null;
+            if (!string.IsNullOrWhiteSpace(dto.TimeSlot))
+            {
+                var startPart = dto.TimeSlot.Split('-')[0].Trim();
+                if (TimeSpan.TryParse(startPart, out var parsedStart)) requestedStart = parsedStart;
+            }
+
+            try
+            {
+                var conn = _context.Database.GetDbConnection();
+                if (conn.State != ConnectionState.Open) await conn.OpenAsync();
+
+                using var schedCmd = conn.CreateCommand();
+                schedCmd.CommandText = "SELECT schedule_id, start_time, end_time FROM doctor_schedules WHERE doctor_id = @dId AND work_date = @wDate LIMIT 1";
+                var scP1 = schedCmd.CreateParameter(); scP1.ParameterName = "@dId"; scP1.Value = validDoctorId; schedCmd.Parameters.Add(scP1);
+                var scP2 = schedCmd.CreateParameter(); scP2.ParameterName = "@wDate"; scP2.Value = apptDate.Value.ToDateTime(TimeOnly.MinValue); schedCmd.Parameters.Add(scP2);
+
+                int scheduleId = 0;
+                TimeSpan schedStart = TimeSpan.Zero, schedEnd = TimeSpan.Zero;
+                using (var schedReader = await schedCmd.ExecuteReaderAsync())
+                {
+                    if (await schedReader.ReadAsync())
+                    {
+                        scheduleId = schedReader.GetInt32(0);
+                        schedStart = GetTimeSpanValue(schedReader, 1);
+                        schedEnd = GetTimeSpanValue(schedReader, 2);
+                    }
+                }
+
+                if (scheduleId <= 0)
+                    return BadRequest(new { success = false, message = "Bác sĩ không có lịch làm việc vào ngày đã chọn. Vui lòng chọn ngày/bác sĩ khác." });
+
+                if (requestedStart.HasValue)
+                {
+                    using var slotCmd = conn.CreateCommand();
+                    slotCmd.CommandText = @"
+                        SELECT slot_id FROM doctor_schedule_slots
+                        WHERE schedule_id = @schedId AND status = 'Available' AND start_time = @sTime
+                          AND slot_id NOT IN (SELECT slot_id FROM appointments WHERE slot_id IS NOT NULL)
+                        LIMIT 1";
+                    var slP1 = slotCmd.CreateParameter(); slP1.ParameterName = "@schedId"; slP1.Value = scheduleId; slotCmd.Parameters.Add(slP1);
+                    var slP2 = slotCmd.CreateParameter(); slP2.ParameterName = "@sTime"; slP2.Value = requestedStart.Value; slotCmd.Parameters.Add(slP2);
+                    var slotVal = await slotCmd.ExecuteScalarAsync();
+                    if (slotVal != null && slotVal != DBNull.Value) slotId = Convert.ToInt32(slotVal);
+
+                    // Chưa có slot 30' nào được sinh sẵn đúng giờ này (Web Admin/Lễ tân cho chọn tự do
+                    // 08:00-22:00, không bị giới hạn theo các slot mobile đã sinh) — nếu giờ yêu cầu vẫn
+                    // nằm trong khung làm việc [start_time, end_time) của bác sĩ ngày hôm đó thì tự tạo
+                    // đúng slot đó thay vì từ chối một giờ hợp lệ.
+                    if (slotId <= 0 && requestedStart.Value >= schedStart && requestedStart.Value < schedEnd)
+                    {
+                        using var insSlot = conn.CreateCommand();
+                        insSlot.CommandText = @"
+                            INSERT INTO doctor_schedule_slots (schedule_id, slot_order, start_time, end_time, status, created_at, updated_at)
+                            VALUES (@schedId, (SELECT COALESCE(MAX(slot_order), 0) + 1 FROM doctor_schedule_slots WHERE schedule_id = @schedId), @sTime, @eTime, 'Available', NOW(), NOW())
+                            RETURNING slot_id";
+                        var isP1 = insSlot.CreateParameter(); isP1.ParameterName = "@schedId"; isP1.Value = scheduleId; insSlot.Parameters.Add(isP1);
+                        var isP2 = insSlot.CreateParameter(); isP2.ParameterName = "@sTime"; isP2.Value = requestedStart.Value; insSlot.Parameters.Add(isP2);
+                        var isP3 = insSlot.CreateParameter(); isP3.ParameterName = "@eTime"; isP3.Value = requestedStart.Value.Add(TimeSpan.FromMinutes(30)); insSlot.Parameters.Add(isP3);
+                        var newSlotVal = await insSlot.ExecuteScalarAsync();
+                        if (newSlotVal != null && newSlotVal != DBNull.Value) slotId = Convert.ToInt32(newSlotVal);
+                    }
+                }
+                else
+                {
+                    using var slotCmd = conn.CreateCommand();
+                    slotCmd.CommandText = @"
+                        SELECT slot_id FROM doctor_schedule_slots
+                        WHERE schedule_id = @schedId AND status = 'Available'
+                          AND slot_id NOT IN (SELECT slot_id FROM appointments WHERE slot_id IS NOT NULL)
+                        ORDER BY start_time ASC LIMIT 1";
+                    var slP1 = slotCmd.CreateParameter(); slP1.ParameterName = "@schedId"; slP1.Value = scheduleId; slotCmd.Parameters.Add(slP1);
+                    var slotVal = await slotCmd.ExecuteScalarAsync();
+                    if (slotVal != null && slotVal != DBNull.Value) slotId = Convert.ToInt32(slotVal);
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine("Schedule slot lookup warning: " + ex.Message);
+                return StatusCode(500, new { success = false, message = "Lỗi khi tra cứu khung giờ khám. Vui lòng thử lại." });
+            }
+
+            if (slotId <= 0)
+                return BadRequest(new { success = false, message = "Khung giờ đã chọn không còn khả dụng hoặc nằm ngoài giờ làm việc của bác sĩ ngày hôm đó. Vui lòng chọn khung giờ khác." });
 
             int queueNum = (await _context.Appointments.CountAsync(a => a.PatientId == validPatientId)) + 1;
             int newAppointmentId = 0;
@@ -657,17 +658,21 @@ public class AppointmentsController : ControllerBase
             if (docUser != null) return docUser.UserId;
         }
 
-        // 5b. Tìm theo tên đầy đủ trong bảng Doctors/Users nếu truyền tên Bác sĩ
-        var matchedDoc = await _context.Doctors.FirstOrDefaultAsync(doc => doc.FullName != null && (doc.FullName.ToLower().Contains(lower) || lower.Contains(doc.FullName.ToLower())));
+        // 5b. Tìm theo tên đầy đủ trong bảng Doctors/Users nếu truyền tên Bác sĩ — trước đây so KHỚP
+        // 1 CHIỀU MỘT PHẦN (mutual Contains) khiến 2 bác sĩ tên gần giống nhau (vd "Văn A" và "Văn An")
+        // có thể bị nhận nhầm là người hủy lịch. Chỉ chấp nhận khớp CHÍNH XÁC toàn bộ tên (đã chuẩn
+        // hóa khoảng trắng/hoa-thường), không suy diễn qua substring.
+        var matchedDoc = await _context.Doctors.FirstOrDefaultAsync(doc => doc.FullName != null && doc.FullName.ToLower().Trim() == lower);
         if (matchedDoc != null && matchedDoc.UserId != Guid.Empty) return matchedDoc.UserId;
 
         // 6. Default Fallback cho Lễ tân Web Admin
         var receptionistUser = await _context.Users.FirstOrDefaultAsync(u => u.RoleId == 4 || u.RoleId == 1 || u.Email == "letan.minhchau@gmail.com");
         if (receptionistUser != null) return receptionistUser.UserId;
 
-        // Fallback: Lấy user_id nhân viên bất kỳ trong CSDL
-        var anyUser = await _context.Users.FirstOrDefaultAsync();
-        return anyUser?.UserId;
+        // Trước đây fallback cuối cùng lấy ĐẠI 1 user BẤT KỲ trong CSDL (kể cả bệnh nhân không liên
+        // quan) làm người hủy lịch — gán sai hoàn toàn còn tệ hơn để trống. Không xác định được thì
+        // trả về null, appt.CancelledBy giữ nguyên giá trị cũ (not set) thay vì gán bừa cho ai đó.
+        return null;
     }
 
     private async Task<List<AppointmentResponseDto>> FormatAppointmentListAsync(List<Appointment> list)
@@ -708,10 +713,18 @@ public class AppointmentsController : ControllerBase
                 if (patientAge <= 0) patientAge = 0;
             }
 
-            string specName = specialty?.SpecialtyName ?? (appt.Reason?.Contains("-") == true ? appt.Reason.Split('-')[0].Trim() : "Khám tổng quát");
-            string docName = doctor?.FullName ?? "BS. CKII Nguyễn Văn A";
+            // Trước đây khi tra cứu Specialty/Doctor thật thất bại, code ĐOÁN specName từ text Reason
+            // (không chắc là tên chuyên khoa thật) và docName lụi về "BS. CKII Nguyễn Văn A" — 1 tên
+            // BÁC SĨ THẬT trong DB, khiến lịch hẹn của bác sĩ/bệnh nhân khác bị hiện NHẦM thành của
+            // bác sĩ đó. Dùng nhãn trung tính rõ ràng "chưa xác định" thay vì đoán/mượn tên người khác.
+            string specName = specialty?.SpecialtyName ?? "Chưa xác định chuyên khoa";
+            string docName = doctor?.FullName ?? "Bác sĩ chưa xác định";
 
-            bool isPkg = appt.Note?.Contains("Gói khám:") == true || docName == "Gói Khám Sức Khỏe" || appt.Reason?.Contains("Tầm soát") == true || appt.Reason?.Contains("Khám Tổng Quát") == true;
+            // isPkg trước đây còn đoán qua Reason.Contains("Tầm soát")/"Khám Tổng Quát" — 1 lịch hẹn
+            // KHÁM THƯỜNG với bác sĩ mà lý do khám tình cờ chứa các cụm này sẽ bị phân loại NHẦM thành
+            // gói khám, ẩn mất tên bác sĩ thật (dòng "docName = \"\"" bên dưới). Note "Gói khám: " là
+            // marker DUY NHẤT do chính HealthPackagesController.BookPackage ghi lúc tạo, đáng tin cậy.
+            bool isPkg = appt.Note?.Contains("Gói khám:") == true;
 
             // Lấy tổng viện phí thực tế từ Hóa đơn (bao gồm Công khám + Phí thuốc do Bác sĩ kê)
             string feeStr = "250.000đ";
@@ -1044,6 +1057,14 @@ public class AppointmentsController : ControllerBase
             Console.WriteLine("Error updating status: " + ex.Message);
             return StatusCode(500, new { success = false, message = ex.Message });
         }
+    }
+
+    private static TimeSpan GetTimeSpanValue(System.Data.Common.DbDataReader reader, int ordinal)
+    {
+        var value = reader.GetValue(ordinal);
+        if (value is TimeSpan ts) return ts;
+        if (value is DateTime dt) return dt.TimeOfDay;
+        return TimeSpan.TryParse(value?.ToString(), out var parsed) ? parsed : TimeSpan.Zero;
     }
 
     private static string FormatTimeSlot(string rawTime)

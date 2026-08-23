@@ -29,6 +29,9 @@ public class CreateDoctorDto
 
     public string? Avatar { get; set; }
 
+    // Admin tự đánh dấu hồ sơ test (QA tạo để thử nghiệm) — tự động ẩn khỏi App Bệnh nhân.
+    public bool IsTestData { get; set; } = false;
+
     // Leave fields (Format: DD/MM/YYYY)
     public string? LeaveStartDate { get; set; }
     public string? LeaveEndDate { get; set; }
@@ -57,6 +60,10 @@ public class UpdateDoctorDto
     public string? AvatarUrl { get; set; }
 
     public string? Avatar { get; set; }
+
+    // Admin tự đánh dấu hồ sơ test (QA tạo để thử nghiệm) — tự động ẩn khỏi App Bệnh nhân. Nullable
+    // vì đây là edit DTO: không gửi field này nghĩa là "giữ nguyên giá trị hiện có", không mặc định về false.
+    public bool? IsTestData { get; set; }
 
     // Leave fields (Format: DD/MM/YYYY)
     public string? LeaveStartDate { get; set; }

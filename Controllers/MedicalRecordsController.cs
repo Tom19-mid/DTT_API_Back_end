@@ -80,15 +80,23 @@ public class MedicalRecordsController : ControllerBase
                 return "Nội tổng quát";
             });
 
+            // Trước đây bảng này bị xáo trộn hoàn toàn so với bảng specialties thật trong DB (vd
+            // id=1 map sang "pediatrics" trong khi id=1 thật là Nội tổng quát) — khiến hồ sơ bệnh án
+            // gắn nhầm icon/danh mục cho gần như mọi chuyên khoa. Khớp đúng theo thứ tự specialty_id
+            // thật (1=Nội tổng quát...11=Mắt), dùng chung key với SettingsContext.tsx bên Mobile.
             var specialtyMap = new Dictionary<int, string>
             {
-                { 1, "pediatrics" },
-                { 2, "general_internal" },
+                { 1, "general_internal" },
+                { 2, "pediatrics" },
                 { 3, "obstetrics" },
-                { 4, "cardiology" },
-                { 5, "dentistry" },
-                { 6, "otolaryngology" },
-                { 7, "dermatology" }
+                { 4, "musculoskeletal" },
+                { 5, "cardiology" },
+                { 6, "neurology" },
+                { 7, "dermatology" },
+                { 8, "imaging" },
+                { 9, "dentistry" },
+                { 10, "otolaryngology" },
+                { 11, "ophthalmology" }
             };
 
             // 1. Phieu kham (Medical Records)
@@ -105,7 +113,9 @@ public class MedicalRecordsController : ControllerBase
             {
                 string doctorName = doctorMap.ContainsKey(r.DoctorId) ? doctorMap[r.DoctorId] : "BS. Nguyễn Văn A";
                 string specialtyName = doctorSpecMap.ContainsKey(r.DoctorId) ? doctorSpecMap[r.DoctorId] : "Nội tổng quát";
-                int specId = docList.FirstOrDefault(d => d.DoctorId == r.DoctorId)?.SpecialtyId ?? 2;
+                // Mặc định id=1 (Nội tổng quát) khi thiếu SpecialtyId — trước đây lụi về id=2 (thật
+                // ra là Nhi khoa), khớp với fallback "Nội tổng quát" đã dùng ở doctorSpecMap phía trên.
+                int specId = docList.FirstOrDefault(d => d.DoctorId == r.DoctorId)?.SpecialtyId ?? 1;
                 string clinicKey = specialtyMap.ContainsKey(specId) ? specialtyMap[specId] : "general_internal";
                 string code = $"PK-{r.ExaminationDate:yyyyMMdd}-{r.MedicalRecordId:D2}";
 

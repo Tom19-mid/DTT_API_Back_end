@@ -83,6 +83,8 @@ public class SpecialtiesController : ControllerBase
             // Auto-seed nếu database trống
             if (list.Count == 0)
             {
+                // Trước đây chỉ seed 8 chuyên khoa — DB thật hiện đã có 11 (thêm Răng hàm mặt/Tai-Mũi-Họng/
+                // Mắt qua Web Admin). Khớp đủ 11 để 1 DB mới/test bootstrap qua endpoint này không bị thiếu.
                 var defaults = new List<Specialty>
                 {
                     new Specialty { SpecialtyName = "Nội tổng quát", Description = "Khám và điều trị các bệnh lý nội khoa chung", Status = true },
@@ -92,7 +94,10 @@ public class SpecialtiesController : ControllerBase
                     new Specialty { SpecialtyName = "Tim mạch", Description = "Tầm soát và điều trị bệnh lý tim mạch, huyết áp", Status = true },
                     new Specialty { SpecialtyName = "Thần kinh", Description = "Tầm soát các bệnh lý hệ thần kinh và não bộ", Status = true },
                     new Specialty { SpecialtyName = "Da liễu", Description = "Tư vấn và điều trị các bệnh về da", Status = true },
-                    new Specialty { SpecialtyName = "Chẩn đoán hình ảnh", Description = "Siêu âm, X-quang, chụp CT scanner", Status = true }
+                    new Specialty { SpecialtyName = "Chẩn đoán hình ảnh", Description = "Siêu âm, X-quang, chụp CT scanner", Status = true },
+                    new Specialty { SpecialtyName = "Răng hàm mặt", Description = "Khám và điều trị các bệnh lý về răng, hàm, mặt", Status = true },
+                    new Specialty { SpecialtyName = "Tai-Mũi-Họng", Description = "Khám và điều trị các bệnh lý về tai, mũi và họng", Status = true },
+                    new Specialty { SpecialtyName = "Mắt", Description = "Khám, chẩn đoán và điều trị các bệnh lý về mắt", Status = true }
                 };
 
                 _context.Specialties.AddRange(defaults);
@@ -336,10 +341,15 @@ public class SpecialtiesController : ControllerBase
                 .OrderBy(s => s.SpecialtyId)
                 .ToListAsync();
 
+            // Trước đây lọc bác sĩ bằng cách ĐOÁN theo tiền tố tên ("BS.", "Bác sĩ"...) — vừa loại
+            // nhầm bác sĩ thật không đặt tên theo quy ước đó, vừa vô tình NHẬN VÀO các hồ sơ rác kiểu
+            // "Bác sĩ C"/"Bác sĩ Tân" (tên có sẵn tiền tố "Bác sĩ"). Lọc đúng theo Status, khớp với quy
+            // ước dùng xuyên suốt hệ thống (DoctorsController.GetDoctors): Active/OnLeave mới hiển thị,
+            // Locked/Inactive bị ẩn — nhất quán với API bác sĩ theo chuyên khoa bên Mobile.
             var doctors = await _context.Doctors
                 .Where(d => d.SpecialtyId.HasValue &&
-                            d.FullName != null &&
-                            (d.FullName.Contains("BS.") || d.FullName.Contains("Bác sĩ") || d.FullName.Contains("ThS.") || d.FullName.Contains("TS.")))
+                            (string.IsNullOrEmpty(d.Status) || d.Status == "Active" || d.Status == "OnLeave") &&
+                            !d.IsTestData)
                 .ToListAsync();
 
             var specDict = specialties.ToDictionary(s => s.SpecialtyId, s => s.SpecialtyName);

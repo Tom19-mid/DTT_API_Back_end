@@ -1,9 +1,11 @@
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.Authorization;
+using Microsoft.AspNetCore.SignalR;
 using Microsoft.EntityFrameworkCore;
 using System.Security.Claims;
 using DTT_Backend_API.Data;
 using DTT_Backend_API.Helpers;
+using DTT_Backend_API.Hubs;
 using DTT_Backend_API.Models;
 
 namespace DTT_Backend_API.Controllers;
@@ -14,10 +16,12 @@ namespace DTT_Backend_API.Controllers;
 public class NotificationsController : ControllerBase
 {
     private readonly AppDbContext _context;
+    private readonly IHubContext<NotificationHub> _hub;
 
-    public NotificationsController(AppDbContext context)
+    public NotificationsController(AppDbContext context, IHubContext<NotificationHub> hub)
     {
         _context = context;
+        _hub = hub;
     }
 
     // ── GET /api/notifications (Lấy danh sách thông báo lọc theo UserId của Admin / Web đang đăng nhập) ──
@@ -116,21 +120,39 @@ public class NotificationsController : ControllerBase
             // chọn người nhận (nhãn ghi "Phát thông báo tới người dùng hệ thống"), mọi thông báo tạo ra
             // từ trước tới giờ chỉ đến được chính tài khoản Admin, KHÔNG BAO GIỜ tới bệnh nhân nào —
             // tính năng phát thông báo trên thực tế chưa hoạt động. Sửa lại đúng ý định: không chỉ định
-            // UserId cụ thể = phát cho TẤT CẢ bệnh nhân đang hoạt động (mirror cách
-            // ChatController.EscalateSession fan-out 1 dòng Notification cho mỗi lễ tân).
+            // UserId cụ thể = phát cho cả nhóm đối tượng (mirror cách ChatController.EscalateSession
+            // fan-out 1 dòng Notification cho mỗi lễ tân). TargetRole mặc định "PATIENT" để giữ đúng
+            // hành vi cũ khi Web Admin/hệ thống khác chưa gửi field này — trước đây RoleId=2 (Bác sĩ)
+            // không hề nằm trong phạm vi broadcast nên "Admin tạo thông báo, Bác sĩ không thấy" luôn
+            // đúng dù có real-time hay không.
             if (targetUserId == null)
             {
-                var activePatientUserIds = await _context.Patients
-                    .Join(_context.Users.Where(u => u.RoleId == 3 && u.Status == "Active"),
-                          p => p.UserId, u => u.UserId, (p, u) => u.UserId)
-                    .Distinct()
-                    .ToListAsync();
+                string targetRole = string.IsNullOrWhiteSpace(dto.TargetRole) ? "PATIENT" : dto.TargetRole.Trim().ToUpperInvariant();
+                int roleId = targetRole == "DOCTOR" ? 2 : 3;
 
-                if (activePatientUserIds.Count == 0)
-                    return BadRequest(new { success = false, message = "Không có bệnh nhân nào để phát thông báo." });
+                List<Guid> activeUserIds;
+                if (roleId == 3)
+                {
+                    activeUserIds = await _context.Patients
+                        .Join(_context.Users.Where(u => u.RoleId == 3 && u.Status == "Active"),
+                              p => p.UserId, u => u.UserId, (p, u) => u.UserId)
+                        .Distinct()
+                        .ToListAsync();
+                }
+                else
+                {
+                    activeUserIds = await _context.Users
+                        .Where(u => u.RoleId == 2 && u.Status == "Active")
+                        .Select(u => u.UserId)
+                        .Distinct()
+                        .ToListAsync();
+                }
+
+                if (activeUserIds.Count == 0)
+                    return BadRequest(new { success = false, message = $"Không có {(roleId == 3 ? "bệnh nhân" : "bác sĩ")} nào để phát thông báo." });
 
                 var now = DateTime.UtcNow;
-                var broadcastNotifications = activePatientUserIds.Select(uid => new Notification
+                var broadcastNotifications = activeUserIds.Select(uid => new Notification
                 {
                     UserId = uid,
                     Title = dto.Title.Trim(),
@@ -145,10 +167,14 @@ public class NotificationsController : ControllerBase
                 _context.Notifications.AddRange(broadcastNotifications);
                 await _context.SaveChangesAsync();
 
+                // Báo real-time cho cả nhóm role (thay vì bắt client tự poll lại) — client nhận được
+                // sự kiện này chỉ cần gọi lại GET /api/notifications để lấy đúng nội dung mới nhất.
+                await _hub.Clients.Group($"role:{roleId}").SendAsync("NotificationsChanged");
+
                 return Ok(new
                 {
                     success = true,
-                    message = $"Đã phát thông báo tới {broadcastNotifications.Count} bệnh nhân.",
+                    message = $"Đã phát thông báo tới {broadcastNotifications.Count} {(roleId == 3 ? "bệnh nhân" : "bác sĩ")}.",
                     data = new { broadcastCount = broadcastNotifications.Count }
                 });
             }
@@ -167,6 +193,8 @@ public class NotificationsController : ControllerBase
 
             _context.Notifications.Add(notification);
             await _context.SaveChangesAsync();
+
+            await _hub.Clients.Group($"user:{targetUserId.Value}").SendAsync("NotificationsChanged");
 
             return Ok(new
             {
@@ -505,4 +533,6 @@ public class CreateNotificationDto
     public string? Type { get; set; } = "system";
     public int? RelatedId { get; set; }
     public string? RelatedType { get; set; }
+    // "PATIENT" (mặc định) hoặc "DOCTOR" — chỉ áp dụng khi UserId bỏ trống (broadcast).
+    public string? TargetRole { get; set; }
 }

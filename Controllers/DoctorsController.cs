@@ -38,8 +38,11 @@ public class DoctorsController : ControllerBase
         if (!await _context.Doctors.AnyAsync())
         {
             var specCount = await _context.Specialties.CountAsync();
-            if (specCount < 8)
+            if (specCount < 11)
             {
+                // Khớp đủ 11 chuyên khoa thật trong DB (trước đây chỉ seed 8, thiếu Răng hàm mặt/
+                // Tai-Mũi-Họng/Mắt) — mỗi dòng chỉ insert nếu SpecialtyId đó CHƯA tồn tại (xem vòng lặp
+                // bên dưới), nên không đụng tới 8 chuyên khoa đã có sẵn trên DB thật.
                 var defaults = new[]
                 {
                     new Specialty { SpecialtyId = 1, SpecialtyName = "Nội tổng quát", Description = "Khám bệnh nội khoa chung", Status = true },
@@ -49,7 +52,10 @@ public class DoctorsController : ControllerBase
                     new Specialty { SpecialtyId = 5, SpecialtyName = "Tim mạch", Description = "Khám và điều trị bệnh tim mạch", Status = true },
                     new Specialty { SpecialtyId = 6, SpecialtyName = "Thần kinh", Description = "Tầm soát bệnh lý thần kinh", Status = true },
                     new Specialty { SpecialtyId = 7, SpecialtyName = "Da liễu", Description = "Khám và điều trị bệnh da liễu", Status = true },
-                    new Specialty { SpecialtyId = 8, SpecialtyName = "Chẩn đoán hình ảnh", Description = "Siêu âm, X-quang, chụp CT scanner", Status = true }
+                    new Specialty { SpecialtyId = 8, SpecialtyName = "Chẩn đoán hình ảnh", Description = "Siêu âm, X-quang, chụp CT scanner", Status = true },
+                    new Specialty { SpecialtyId = 9, SpecialtyName = "Răng hàm mặt", Description = "Khám và điều trị các bệnh lý về răng, hàm, mặt", Status = true },
+                    new Specialty { SpecialtyId = 10, SpecialtyName = "Tai-Mũi-Họng", Description = "Khám và điều trị các bệnh lý về tai, mũi và họng", Status = true },
+                    new Specialty { SpecialtyId = 11, SpecialtyName = "Mắt", Description = "Khám, chẩn đoán và điều trị các bệnh lý về mắt", Status = true }
                 };
                 foreach (var sp in defaults)
                 {
@@ -148,12 +154,20 @@ public class DoctorsController : ControllerBase
         }
 
         // Chỉ Admin (Web Admin, quản lý toàn bộ bác sĩ kể cả Khóa/Nghỉ phép) mới thấy đủ mọi trạng
-        // thái; các caller khác (Mobile đặt lịch) chỉ thấy bác sĩ Active — trước đây không lọc gì,
-        // nên bác sĩ đang Nghỉ phép/Khóa vẫn hiện ra để bệnh nhân chọn đặt lịch trên Mobile.
+        // thái. Với các caller khác (Mobile duyệt danh sách theo chuyên khoa): bác sĩ "OnLeave" (nghỉ
+        // phép — vd hôm nay không đi làm) VẪN phải hiện ra khi duyệt/xem hồ sơ theo chuyên khoa, chỉ
+        // ẩn ở đúng bước ĐẶT LỊCH cho ngày họ nghỉ (GetDoctorSchedules đã xử lý riêng qua isWorking).
+        // Trước đây lọc "chỉ Active" ở NGAY BƯỚC DUYỆT CHUYÊN KHOA khiến bác sĩ nghỉ phép biến mất
+        // hoàn toàn kể cả khi bệnh nhân chỉ đang xem thông tin, không hề đặt lịch. Chỉ thật sự ẩn với
+        // "Locked" (tài khoản bị khóa) và "Inactive" (đã nghỉ việc) — 2 trạng thái này mới có nghĩa là
+        // bác sĩ không còn nên xuất hiện trước bệnh nhân ở bất kỳ đâu.
         bool isAdminCaller = User.FindFirst("role_id")?.Value == "1";
         if (!isAdminCaller)
         {
-            query = query.Where(d => string.IsNullOrEmpty(d.Status) || d.Status == "Active");
+            query = query.Where(d => string.IsNullOrEmpty(d.Status) || d.Status == "Active" || d.Status == "OnLeave");
+            // Hồ sơ Admin tự đánh dấu "dữ liệu test" (QA tạo để thử nghiệm) — ẩn khỏi App Bệnh nhân dù
+            // đang Active/OnLeave, không cần khóa tài khoản (bác sĩ test vẫn dùng WinForms bình thường).
+            query = query.Where(d => !d.IsTestData);
         }
 
         // Lấy doctors trước rồi mới suy ra doctorIds từ kết quả trong bộ nhớ, thay vì quét lại toàn
@@ -213,7 +227,14 @@ public class DoctorsController : ControllerBase
                 LeaveStartDate = leaveRecord != null ? leaveRecord.LeaveStartDate.ToString("dd/MM/yyyy") : null,
                 LeaveEndDate = leaveRecord != null ? leaveRecord.LeaveEndDate.ToString("dd/MM/yyyy") : null,
                 LeaveReason = leaveRecord?.Reason,
-                LeaveStatus = leaveRecord != null ? FormatLeaveStatusToVi(leaveRecord.Status) : null
+                LeaveStatus = leaveRecord != null ? FormatLeaveStatusToVi(leaveRecord.Status) : null,
+                // CHỈ 1 property — trước đây có cả IsTestData VÀ isTestData (2 tên khác nhau trong C#
+                // nhưng cùng biến thành "isTestData" sau khi ASP.NET Core tự chuyển camelCase), khiến
+                // System.Text.Json ném lỗi "collides with another property" và sập HẲN endpoint này
+                // (500 Internal Server Error) — đây là nguyên nhân khiến app Mobile không gọi được API
+                // thật, phải rơi về dữ liệu fallback (đúng như ảnh bạn gửi: mọi chuyên khoa đều hiện
+                // lại y hệt 2 bác sĩ fallback "Nguyễn Văn A"/"Lê Thị B" bất kể bấm vào khoa nào).
+                IsTestData = d.IsTestData
             };
         }).ToList();
 
@@ -360,7 +381,8 @@ public class DoctorsController : ControllerBase
                 Status = normDocStatus,
                 AvatarUrl = inputAvatar,
                 Rating = 5.0m,
-                ReviewCount = 0
+                ReviewCount = 0,
+                IsTestData = dto.IsTestData
             };
 
             _context.Doctors.Add(newDoctor);
@@ -466,6 +488,7 @@ public class DoctorsController : ControllerBase
             if (dto.ExperienceYears.HasValue) doctor.ExperienceYears = dto.ExperienceYears.Value;
             if (!string.IsNullOrWhiteSpace(dto.ClinicRoom)) doctor.ClinicRoom = dto.ClinicRoom;
             if (dto.SpecialtyId.HasValue && dto.SpecialtyId.Value > 0) doctor.SpecialtyId = dto.SpecialtyId.Value;
+            if (dto.IsTestData.HasValue) doctor.IsTestData = dto.IsTestData.Value;
 
             if (!string.IsNullOrWhiteSpace(dto.Status))
             {
@@ -673,18 +696,76 @@ public class DoctorsController : ControllerBase
             targetDate = parsed.Date;
         }
 
+        // Đọc lịch làm việc THẬT từ doctor_schedules/doctor_schedule_slots (trước đây hàm này tự sinh
+        // isWorking/timeSlots giả bằng CheckDoctorWorkingDay/GenerateDoctorTimeSlots dựa trên doctorId/tên,
+        // không liên quan gì tới dữ liệu DB — khiến Mobile/WinForms hiện lịch khám sai ngày/sai khung giờ
+        // so với những gì Lễ Tân/Admin thấy trên Web).
+        var doctorIds = doctors.Select(d => d.DoctorId).ToList();
+        var scheduleByDoctor = new Dictionary<int, int>(); // doctorId -> schedule_id
+        var scheduleStatus = new Dictionary<int, string>(); // schedule_id -> status
+        var slotsBySchedule = new Dictionary<int, List<string>>(); // schedule_id -> ["HH:mm - HH:mm", ...]
+
+        if (doctorIds.Count > 0)
+        {
+            var conn = _context.Database.GetDbConnection();
+            if (conn.State != ConnectionState.Open) await conn.OpenAsync();
+
+            var idsStr = string.Join(",", doctorIds);
+            var scheduleIds = new List<int>();
+            using (var cmd = conn.CreateCommand())
+            {
+                cmd.CommandText = $@"
+                    SELECT schedule_id, doctor_id, status
+                    FROM doctor_schedules
+                    WHERE doctor_id IN ({idsStr}) AND work_date = @wDate";
+                var p = cmd.CreateParameter(); p.ParameterName = "@wDate"; p.Value = targetDate.Date; cmd.Parameters.Add(p);
+                using var reader = await cmd.ExecuteReaderAsync();
+                while (await reader.ReadAsync())
+                {
+                    int schId = reader.GetInt32(0);
+                    int docId = reader.GetInt32(1);
+                    string status = reader.IsDBNull(2) ? "Available" : reader.GetString(2);
+                    scheduleByDoctor[docId] = schId;
+                    scheduleStatus[schId] = status;
+                    scheduleIds.Add(schId);
+                }
+            }
+
+            if (scheduleIds.Count > 0)
+            {
+                var schIdsStr = string.Join(",", scheduleIds);
+                using var slotCmd = conn.CreateCommand();
+                slotCmd.CommandText = $@"
+                    SELECT schedule_id, start_time, end_time
+                    FROM doctor_schedule_slots
+                    WHERE schedule_id IN ({schIdsStr}) AND status = 'Available'
+                      AND slot_id NOT IN (SELECT slot_id FROM appointments WHERE slot_id IS NOT NULL)
+                    ORDER BY schedule_id ASC, start_time ASC";
+                using var slotReader = await slotCmd.ExecuteReaderAsync();
+                while (await slotReader.ReadAsync())
+                {
+                    int schId = slotReader.GetInt32(0);
+                    TimeSpan sTime = GetTimeSpanValue(slotReader, 1);
+                    TimeSpan eTime = GetTimeSpanValue(slotReader, 2);
+                    if (!slotsBySchedule.ContainsKey(schId)) slotsBySchedule[schId] = new List<string>();
+                    slotsBySchedule[schId].Add($"{sTime.Hours:D2}:{sTime.Minutes:D2} - {eTime.Hours:D2}:{eTime.Minutes:D2}");
+                }
+            }
+        }
+
         var list = new List<object>();
 
         foreach (var doc in doctors)
         {
-            bool isWorking = CheckDoctorWorkingDay(doc.FullName ?? "", doc.DoctorId, targetDate);
-            string[] timeSlots = isWorking ? GenerateDoctorTimeSlots(doc.DoctorId, targetDate) : new string[0];
+            bool hasSchedule = scheduleByDoctor.TryGetValue(doc.DoctorId, out var scheduleId);
+            string rawStatus = hasSchedule ? scheduleStatus.GetValueOrDefault(scheduleId, "Available") : "Unavailable";
+            bool isWorking = hasSchedule && rawStatus != "Unavailable" && rawStatus != "Off" && rawStatus != "Không hoạt động";
+            var timeSlots = isWorking && slotsBySchedule.TryGetValue(scheduleId, out var slots) ? slots.ToArray() : Array.Empty<string>();
 
             string shiftDescription = "Nghỉ phép (Off)";
             if (isWorking)
             {
-                int shiftType = (doc.DoctorId + targetDate.DayOfYear) % 3;
-                shiftDescription = shiftType == 0 ? "Khám ca Sáng" : shiftType == 1 ? "Khám ca Chiều" : "Khám Cả Ngày";
+                shiftDescription = timeSlots.Length > 0 ? "Đang nhận lịch khám" : "Đã kín lịch khám";
             }
 
             list.Add(new
@@ -703,6 +784,14 @@ public class DoctorsController : ControllerBase
         }
 
         return Ok(list);
+    }
+
+    private static TimeSpan GetTimeSpanValue(System.Data.Common.DbDataReader reader, int ordinal)
+    {
+        var value = reader.GetValue(ordinal);
+        if (value is TimeSpan ts) return ts;
+        if (value is DateTime dt) return dt.TimeOfDay;
+        return TimeSpan.TryParse(value?.ToString(), out var parsed) ? parsed : TimeSpan.Zero;
     }
 
     private static bool CheckDoctorWorkingDay(string docName, int doctorId, DateTime date)
@@ -814,17 +903,6 @@ public class DoctorsController : ControllerBase
         {
             Console.WriteLine($"SeedInitialScheduleForNewDoctorAsync warning (doctorId={doctorId}): {ex.Message}");
         }
-    }
-
-    private static string[] GenerateDoctorTimeSlots(int doctorId, DateTime date)
-    {
-        int shiftPattern = (doctorId + date.DayOfYear) % 3;
-        return shiftPattern switch
-        {
-            0 => new[] { "07:30 - 08:30", "08:30 - 09:30", "09:30 - 10:30", "10:30 - 11:30" }, // Ca Sáng
-            1 => new[] { "13:30 - 14:30", "14:30 - 15:30", "15:30 - 16:30", "16:30 - 17:30" }, // Ca Chiều
-            _ => new[] { "08:00 - 09:00", "09:30 - 10:30", "13:30 - 14:30", "15:00 - 16:00" }, // Cả ngày
-        };
     }
 
     private static string GetVietnameseDayName(DayOfWeek dow)

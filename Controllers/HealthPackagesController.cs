@@ -138,6 +138,9 @@ public class HealthPackagesController : ControllerBase
             int validPatientId = patient.PatientId;
 
             // 3. Obtain target specialty & doctor matching the health package domain
+            // Trước đây chỉ nhận diện được 6/11 chuyên khoa — gói khám nào nhắc tới Chẩn đoán hình
+            // ảnh/Răng hàm mặt/Tai-Mũi-Họng/Mắt đều rơi về mặc định Nội tổng quát (id=1), khiến bệnh
+            // nhân bị xếp lịch sai chuyên khoa hoàn toàn so với tên gói khám.
             int targetSpecialtyId = 1;
             string titleLower = pkg.Title.ToLower();
             if (titleLower.Contains("tim mạch")) targetSpecialtyId = 5;
@@ -146,6 +149,10 @@ public class HealthPackagesController : ControllerBase
             else if (titleLower.Contains("nhi") || titleLower.Contains("trẻ em")) targetSpecialtyId = 2;
             else if (titleLower.Contains("thần kinh")) targetSpecialtyId = 6;
             else if (titleLower.Contains("da liễu")) targetSpecialtyId = 7;
+            else if (titleLower.Contains("x-quang") || titleLower.Contains("x quang") || titleLower.Contains("ct") || titleLower.Contains("mri") || titleLower.Contains("chẩn đoán hình ảnh") || titleLower.Contains("siêu âm")) targetSpecialtyId = 8;
+            else if (titleLower.Contains("răng") || titleLower.Contains("hàm mặt") || titleLower.Contains("nha khoa")) targetSpecialtyId = 9;
+            else if (titleLower.Contains("tai") || titleLower.Contains("mũi") || titleLower.Contains("họng") || titleLower.Contains("tmh")) targetSpecialtyId = 10;
+            else if (titleLower.Contains("mắt") || titleLower.Contains("nhãn khoa")) targetSpecialtyId = 11;
 
             var targetSpecObj = await _context.Specialties.FirstOrDefaultAsync(s => s.SpecialtyId == targetSpecialtyId);
             string specName = targetSpecObj?.SpecialtyName ?? "Nội tổng quát";

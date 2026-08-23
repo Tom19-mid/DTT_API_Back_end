@@ -290,6 +290,12 @@ public class Doctor
     [Column("status")]
     [StringLength(20)]
     public string Status { get; set; } = "Active";
+
+    // Hồ sơ bác sĩ QA/nhân viên tạo để test (vd "Bác sĩ C", "Bác sĩ Tân"...) — Admin tự đánh dấu khi
+    // tạo/sửa bác sĩ để tự động ẩn khỏi App Bệnh nhân mà không cần khóa tài khoản (bác sĩ test vẫn
+    // đăng nhập/dùng thử WinForms bình thường), thay vì phải chạy SQL tay mỗi lần có hồ sơ test mới.
+    [Column("is_test_data")]
+    public bool IsTestData { get; set; } = false;
 }
 
 [Table("doctor_leaves")]

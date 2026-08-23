@@ -74,6 +74,11 @@ public class AuthController : ControllerBase
             return Unauthorized(new { message = "Số điện thoại hoặc mật khẩu không chính xác." });
         }
 
+        if (user.RoleId != 3) // RoleId 3 = Patient (Mobile App only)
+        {
+            return Unauthorized(new { message = "Tài khoản này không có quyền truy cập App Bệnh nhân." });
+        }
+
         var patient = await _context.Patients.FirstOrDefaultAsync(p => p.UserId == user.UserId);
 
         var token = GenerateJwtToken(user);
