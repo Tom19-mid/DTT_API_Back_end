@@ -1,714 +1,1215 @@
+﻿using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Threading.Tasks;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using DTT_Backend_API.Data;
-using DTT_Backend_API.Helpers;
 using DTT_Backend_API.Models;
-using System.Linq;
 
-namespace DTT_Backend_API.Controllers;
-
-[ApiController]
-[Route("api/[controller]")]
-public class MedicalRecordsController : ControllerBase
+namespace DTT_Backend_API.Controllers
 {
-    private readonly AppDbContext _context;
-
-    public MedicalRecordsController(AppDbContext context)
+    [ApiController]
+    [Route("api/[controller]")]
+    public class MedicalRecordsController : ControllerBase
     {
-        _context = context;
-    }
+        private readonly AppDbContext _context;
 
-    // GET /api/medicalrecords/icd10?specialtyId=X&search=Y
-    // Trả về danh mục ICD-10 — nếu có specialtyId, mã thuộc đúng chuyên khoa của bác sĩ được xếp
-    // lên đầu danh sách (gợi ý thông minh), nhưng vẫn trả về đủ toàn bộ để bác sĩ tìm mã khác nếu cần.
-    [HttpGet("icd10")]
-    public async Task<IActionResult> GetIcd10Catalog([FromQuery] int? specialtyId, [FromQuery] string? search)
-    {
-        try
+        public MedicalRecordsController(AppDbContext context)
         {
-            var query = _context.Icd10Catalogs.AsQueryable();
-
-            if (!string.IsNullOrWhiteSpace(search))
-            {
-                string s = search.Trim().ToLower();
-                query = query.Where(c => c.IcdCode.ToLower().Contains(s) || c.DiseaseName.ToLower().Contains(s));
-            }
-
-            var all = await query.ToListAsync();
-
-            var ordered = specialtyId.HasValue && specialtyId.Value > 0
-                ? all.OrderByDescending(c => c.SpecialtyId == specialtyId.Value)
-                     .ThenBy(c => c.DiseaseName)
-                     .ToList()
-                : all.OrderBy(c => c.DiseaseName).ToList();
-
-            var result = ordered.Select(c => new
-            {
-                icdCode = c.IcdCode,
-                diseaseName = c.DiseaseName,
-                chapterName = c.ChapterName,
-                isCommon = c.IsCommon,
-                specialtyId = c.SpecialtyId,
-                matchesSpecialty = specialtyId.HasValue && c.SpecialtyId == specialtyId.Value
-            });
-
-            return Ok(new { success = true, items = result });
+            _context = context;
         }
-        catch (Exception ex)
+
+                // GET /api/MedicalRecords/all?search={search}&doctorId={doctorId}&patientId={patientId}
+        [HttpGet("all")]
+        public async Task<IActionResult> GetAllMedicalRecords([FromQuery] string? search, [FromQuery] int? doctorId, [FromQuery] int? patientId)
         {
-            return StatusCode(500, new { success = false, message = ex.Message });
-        }
-    }
-
-    // GET /api/medicalrecords/patient/{patientId}
-    [HttpGet("patient/{patientId}")]
-    public async Task<IActionResult> GetPatientMedicalRecords(int patientId)
-    {
-        if (!await AccessControl.CanAccessPatientAsync(User, _context, patientId)) return this.ForbidJson();
-        try
-        {
-            var docList = await _context.Doctors.ToListAsync();
-            var specList = await _context.Specialties.ToListAsync();
-            var specDict = specList.ToDictionary(s => s.SpecialtyId, s => s.SpecialtyName);
-
-            var doctorMap = docList.ToDictionary(d => d.DoctorId, d => d.FullName ?? "Bác sĩ");
-            var doctorSpecMap = docList.ToDictionary(d => d.DoctorId, d => {
-                if (d.SpecialtyId.HasValue && specDict.ContainsKey(d.SpecialtyId.Value))
-                    return specDict[d.SpecialtyId.Value];
-                if (!string.IsNullOrEmpty(d.Degree))
-                    return d.Degree.Replace("Thạc sĩ Chuyên môn ", "").Replace("Chuyên khoa II ", "");
-                return "Nội tổng quát";
-            });
-
-            // Trước đây bảng này bị xáo trộn hoàn toàn so với bảng specialties thật trong DB (vd
-            // id=1 map sang "pediatrics" trong khi id=1 thật là Nội tổng quát) — khiến hồ sơ bệnh án
-            // gắn nhầm icon/danh mục cho gần như mọi chuyên khoa. Khớp đúng theo thứ tự specialty_id
-            // thật (1=Nội tổng quát...11=Mắt), dùng chung key với SettingsContext.tsx bên Mobile.
-            var specialtyMap = new Dictionary<int, string>
+            try
             {
-                { 1, "general_internal" },
-                { 2, "pediatrics" },
-                { 3, "obstetrics" },
-                { 4, "musculoskeletal" },
-                { 5, "cardiology" },
-                { 6, "neurology" },
-                { 7, "dermatology" },
-                { 8, "imaging" },
-                { 9, "dentistry" },
-                { 10, "otolaryngology" },
-                { 11, "ophthalmology" }
-            };
+                var query = _context.MedicalRecords.AsQueryable();
 
-            // 1. Phieu kham (Medical Records)
-            var records = await _context.MedicalRecords
-                .Where(r => r.PatientId == patientId)
-                .OrderByDescending(r => r.ExaminationDate)
-                .ToListAsync();
-
-            var phieuKham = new List<object>();
-            var xetNghiem = new List<object>();
-            var sieuAm = new List<object>();
-
-            foreach (var r in records)
-            {
-                string doctorName = doctorMap.ContainsKey(r.DoctorId) ? doctorMap[r.DoctorId] : "BS. Nguyễn Văn A";
-                string specialtyName = doctorSpecMap.ContainsKey(r.DoctorId) ? doctorSpecMap[r.DoctorId] : "Nội tổng quát";
-                // Mặc định id=1 (Nội tổng quát) khi thiếu SpecialtyId — trước đây lụi về id=2 (thật
-                // ra là Nhi khoa), khớp với fallback "Nội tổng quát" đã dùng ở doctorSpecMap phía trên.
-                int specId = docList.FirstOrDefault(d => d.DoctorId == r.DoctorId)?.SpecialtyId ?? 1;
-                string clinicKey = specialtyMap.ContainsKey(specId) ? specialtyMap[specId] : "general_internal";
-                string code = $"PK-{r.ExaminationDate:yyyyMMdd}-{r.MedicalRecordId:D2}";
-
-                phieuKham.Add(new
+                if (doctorId.HasValue && doctorId.Value > 0)
                 {
-                    id = r.MedicalRecordId,
-                    date = r.ExaminationDate.ToString("dd/MM/yyyy"),
-                    doctor = doctorName,
-                    specialtyName = specialtyName,
-                    clinicKey = clinicKey,
-                    code = code,
-                    symptoms = r.Symptoms,
-                    diagnosis = r.Diagnosis,
-                    conclusion = r.Conclusion,
-                    treatmentPlan = r.TreatmentPlan,
-                    bloodPressure = r.BloodPressure,
-                    heartRate = r.HeartRate,
-                    temperature = r.Temperature,
-                    weight = r.Weight,
-                    height = r.Height,
-                    bmi = r.Bmi
-                });
-
-                // Load tests for this medical record
-                var tests = await _context.MedicalTests.Where(t => t.MedicalRecordId == r.MedicalRecordId).ToListAsync();
-                foreach (var t in tests)
-                {
-                    // Chưa có kết quả (KTV chưa thực hiện) — KHÔNG được ngầm định là "Bình thường",
-                    // dễ gây hiểu lầm cho bệnh nhân là đã có kết quả tốt trong khi thực ra chưa làm.
-                    string testResult = t.ResultStatus == "Pending" ? "Đang chờ kết quả" : (t.ResultValue ?? "Bình thường");
-                    xetNghiem.Add(new
-                    {
-                        id = t.TestId,
-                        date = r.ExaminationDate.ToString("dd/MM/yyyy"),
-                        clinicKey = clinicKey,
-                        type = t.TestName,
-                        result = testResult,
-                        status = t.ResultStatus,
-                        code = $"XN-{r.ExaminationDate:yyyyMMdd}-{t.TestId:D2}"
-                    });
+                    query = query.Where(r => r.DoctorId == doctorId.Value);
                 }
 
-                // Load ultrasound for this record
-                var uls = await _context.UltrasoundResults.Where(u => u.MedicalRecordId == r.MedicalRecordId).ToListAsync();
-                foreach (var u in uls)
+                if (patientId.HasValue && patientId.Value > 0)
                 {
-                    string ulsResult = u.ResultStatus == "Pending" ? "Đang chờ kết quả" : (u.Conclusion ?? "Bình thường");
-                    sieuAm.Add(new
-                    {
-                        id = u.UltrasoundId,
-                        date = (u.PerformedAt ?? r.ExaminationDate).ToString("dd/MM/yyyy"),
-                        clinicKey = clinicKey,
-                        type = u.UltrasoundType ?? "Siêu âm tổng quát",
-                        result = ulsResult,
-                        status = u.ResultStatus,
-                        imageUrls = u.ImageUrls ?? Array.Empty<string>(),
-                        code = $"SA-{(u.PerformedAt ?? r.ExaminationDate):yyyyMMdd}-{u.UltrasoundId:D2}"
-                    });
+                    query = query.Where(r => r.PatientId == patientId.Value);
                 }
-            }
 
-            // 2. Toa thuoc (Prescriptions)
-            var prescriptions = await _context.Prescriptions
-                .Where(p => p.PatientId == patientId)
-                .OrderByDescending(p => p.CreatedAt)
-                .ToListAsync();
-
-            var toaThuoc = new List<object>();
-            foreach (var p in prescriptions)
-            {
-                var details = await _context.PrescriptionDetails.Where(d => d.PrescriptionId == p.PrescriptionId).ToListAsync();
-                string itemsStr = details.Count > 0 ? string.Join(", ", details.Select(d => d.MedicineNameSnapshot)) : "Paracetamol 500mg, Vitamin C";
-                string doctorName = doctorMap.ContainsKey(p.DoctorId) ? doctorMap[p.DoctorId] : "BS. Lê Thị B";
-
-                toaThuoc.Add(new
-                {
-                    id = p.PrescriptionId,
-                    date = p.CreatedAt.ToString("dd/MM/yyyy"),
-                    doctor = doctorName,
-                    clinicKey = "general_internal",
-                    items = itemsStr,
-                    code = $"TT-{p.CreatedAt:yyyyMMdd}-{p.PrescriptionId:D2}",
-                    prescriptionItems = details.Select(d => new
-                    {
-                        name = d.MedicineNameSnapshot,
-                        usage = $"Số lượng: {d.Quantity} {d.UnitSnapshot}. {d.UsageInstruction}"
-                    }).ToList()
-                });
-            }
-            // Fallback mock data removed
-
-            // 3. Hoa don (Invoices) - Chi hien thi hoa don DA THANH TOAN (paid)
-            // Invoice "pending" chi hien o man hinh Le Tan, khong hien tren App Mobile
-            var invoices = await _context.Invoices
-                .Where(i => i.PatientId == patientId && i.PaymentStatus == "paid")
-                .OrderByDescending(i => i.InvoiceDate)
-                .ToListAsync();
-
-
-            var hoaDon = new List<object>();
-            foreach (var inv in invoices)
-            {
-                var appt = await _context.Appointments.FirstOrDefaultAsync(a => a.AppointmentId == inv.AppointmentId);
-                int docId = appt?.DoctorId ?? 1;
-                string doctorName = doctorMap.ContainsKey(docId) ? doctorMap[docId] : "BS. Nguyễn Văn A";
-
-                // Trả về CHI TIẾT dòng hóa đơn thật (invoice_items) — trước đây chỉ có 1 dòng tóm tắt,
-                // khiến app Mobile phải TỰ ĐOÁN cách chia (luôn giả định 250k phí khám + phần còn lại
-                // là "thuốc"), sai hoàn toàn với gói khám hoặc ca có phí khác 250k.
-                var invoiceItems = await _context.InvoiceItems
-                    .Where(ii => ii.InvoiceId == inv.InvoiceId)
-                    .OrderBy(ii => ii.ItemId)
-                    .Select(ii => new { name = ii.ItemName, amount = ii.Amount })
+                var records = await query
+                    .OrderByDescending(r => r.ExaminationDate)
                     .ToListAsync();
 
-                hoaDon.Add(new
+                if (records.Count == 0)
                 {
-                    id = inv.InvoiceId,
-                    date = inv.InvoiceDate.ToString("dd/MM/yyyy"),
-                    doctor = doctorName,
-                    clinicKey = "general_internal",
-                    items = $"Chi phí khám & Dịch vụ y tế (Tổng: {inv.TotalAmount:N0} VNĐ)",
-                    invoiceItems,
-                    code = $"HD-{inv.InvoiceDate:yyyyMMdd}-{inv.InvoiceId:D2}",
-                    totalAmount = inv.TotalAmount,
-                    paymentStatus = inv.PaymentStatus
-                });
-            }
-            // Fallback mock data removed
-
-            return Ok(new
-            {
-                phieu_kham = phieuKham,
-                toa_thuoc = toaThuoc,
-                xet_nghiem = xetNghiem,
-                sieu_am = sieuAm,
-                hoa_don = hoaDon
-            });
-        }
-        catch (Exception ex)
-        {
-            return StatusCode(500, new { success = false, message = "Lỗi lấy hồ sơ: " + ex.Message });
-        }
-    }
-
-    // GET /api/MedicalRecords/all
-    [HttpGet("all")]
-    public async Task<IActionResult> GetAllMedicalRecords([FromQuery] string? search, [FromQuery] int? doctorId)
-    {
-        if (!AccessControl.IsStaff(User)) return this.ForbidJson();
-        try
-        {
-            var query = _context.MedicalRecords.AsQueryable();
-            if (doctorId.HasValue && doctorId.Value > 0)
-            {
-                query = query.Where(r => r.DoctorId == doctorId.Value);
-            }
-            var records = await query.OrderByDescending(r => r.ExaminationDate).ToListAsync();
-
-            var result = new List<object>();
-            var docMap = await _context.Doctors.ToDictionaryAsync(d => d.DoctorId, d => d.FullName ?? "Bác sĩ");
-            var patientMap = await _context.Patients.ToDictionaryAsync(p => p.PatientId, p => p.FullName ?? "Bệnh nhân");
-            var patientPhoneMap = await _context.Patients.ToDictionaryAsync(p => p.PatientId, p => p.PhoneNumber ?? "");
-
-            foreach (var r in records)
-            {
-                string pName = patientMap.ContainsKey(r.PatientId) ? patientMap[r.PatientId] : "Bệnh nhân";
-                string pPhone = patientPhoneMap.ContainsKey(r.PatientId) ? patientPhoneMap[r.PatientId] : "";
-                string dName = docMap.ContainsKey(r.DoctorId) ? docMap[r.DoctorId] : "BS. Nguyễn Văn A";
-                var rx = await _context.Prescriptions.FirstOrDefaultAsync(p => p.MedicalRecordId == r.MedicalRecordId);
-                var rxDetails = rx != null ? await _context.PrescriptionDetails.Where(d => d.PrescriptionId == rx.PrescriptionId).ToListAsync() : new List<PrescriptionDetail>();
-
-                if (!string.IsNullOrEmpty(search))
-                {
-                    string s = search.ToLower();
-                    bool matchName = pName.ToLower().Contains(s);
-                    bool matchPhone = pPhone.ToLower().Contains(s);
-                    bool matchDiag = (r.Diagnosis ?? "").ToLower().Contains(s);
-                    bool matchCode = (r.IcdCode ?? "").ToLower().Contains(s);
-                    if (!matchName && !matchPhone && !matchDiag && !matchCode) continue;
+                    return Ok(new List<object>());
                 }
 
-                result.Add(new
+                var patientIds = records.Select(r => r.PatientId).Distinct().ToList();
+                var doctorIds = records.Select(r => r.DoctorId).Distinct().ToList();
+                var recordIds = records.Select(r => r.MedicalRecordId).ToList();
+
+                var patients = await _context.Patients
+                    .Where(p => patientIds.Contains(p.PatientId))
+                    .ToDictionaryAsync(p => p.PatientId);
+
+                var doctors = await _context.Doctors
+                    .Where(d => doctorIds.Contains(d.DoctorId))
+                    .ToDictionaryAsync(d => d.DoctorId);
+
+                var prescriptions = await _context.Prescriptions
+                    .Where(p => recordIds.Contains(p.MedicalRecordId))
+                    .ToListAsync();
+
+                var pIds = prescriptions.Select(p => p.PrescriptionId).ToList();
+                var prescriptionDetails = await _context.PrescriptionDetails
+                    .Where(d => pIds.Contains(d.PrescriptionId))
+                    .ToListAsync();
+
+                var detailsByPrescriptionId = prescriptionDetails
+                    .GroupBy(d => d.PrescriptionId)
+                    .ToDictionary(g => g.Key, g => g.ToList());
+
+                var result = new List<dynamic>();
+
+                foreach (var r in records)
                 {
-                    medicalRecordId = r.MedicalRecordId,
-                    appointmentId = r.AppointmentId,
-                    patientId = r.PatientId,
-                    patientName = pName,
-                    phoneNumber = pPhone,
-                    doctorId = r.DoctorId,
-                    doctorName = dName,
-                    examinationDate = r.ExaminationDate.ToString("dd/MM/yyyy HH:mm"),
-                    symptoms = r.Symptoms ?? "",
-                    diagnosis = r.Diagnosis ?? "",
-                    treatmentPlan = r.TreatmentPlan ?? "",
-                    icdCode = r.IcdCode ?? "",
-                    pulse = r.HeartRate?.ToString() ?? "",
-                    bloodPressure = r.BloodPressure ?? "",
-                    temperature = r.Temperature?.ToString() ?? "",
-                    weight = r.Weight?.ToString() ?? "",
-                    bmi = r.Bmi?.ToString() ?? "",
-                    prescriptionsCount = rxDetails.Count,
-                    prescriptionsSummary = string.Join(", ", rxDetails.Select(d => $"{d.MedicineNameSnapshot} ({d.Quantity} {d.UnitSnapshot})"))
-                });
-            }
+                    patients.TryGetValue(r.PatientId, out var patient);
+                    doctors.TryGetValue(r.DoctorId, out var doctor);
 
-            return Ok(result);
-        }
-        catch (Exception ex)
-        {
-            return StatusCode(500, new { message = ex.Message });
-        }
-    }
+                    var rx = prescriptions.FirstOrDefault(p => p.MedicalRecordId == r.MedicalRecordId);
+                    var details = rx != null && detailsByPrescriptionId.TryGetValue(rx.PrescriptionId, out var dList)
+                        ? dList
+                        : new List<PrescriptionDetail>();
 
-    private async Task TrySeedSampleRecords(int patientId)
-    {
-        try
-        {
-            int docId = 1;
-            int slotId = 1;
+                    string presSummary = details.Count > 0
+                        ? string.Join(", ", details.Select(d => $"{d.MedicineNameSnapshot} ({d.Quantity} {d.UnitSnapshot})"))
+                        : (rx != null && !string.IsNullOrEmpty(rx.Note) ? rx.Note : "");
 
-            try 
-            {
-                using (var command = _context.Database.GetDbConnection().CreateCommand())
-                {
-                    command.CommandText = "SELECT s.slot_id, d.doctor_id FROM doctor_schedule_slots s JOIN doctor_schedules d ON s.schedule_id = d.schedule_id LIMIT 1;";
-                    if (_context.Database.GetDbConnection().State != System.Data.ConnectionState.Open)
-                        await _context.Database.OpenConnectionAsync();
-                    using (var result = await command.ExecuteReaderAsync())
+                    string patientName = patient?.FullName ?? "Bá»‡nh nhÃ¢n";
+                    string phone = patient?.PhoneNumber ?? "";
+                    string doctorName = doctor != null ? $"{doctor.Degree} {doctor.FullName}".Trim() : "BÃ¡c sÄ©";
+
+                    // Filter search if provided
+                    if (!string.IsNullOrWhiteSpace(search))
                     {
-                        if (await result.ReadAsync())
+                        string s = search.Trim().ToLower();
+                        bool match = patientName.ToLower().Contains(s) ||
+                                     phone.ToLower().Contains(s) ||
+                                     (r.IcdCode != null && r.IcdCode.ToLower().Contains(s)) ||
+                                     (r.Diagnosis != null && r.Diagnosis.ToLower().Contains(s));
+                        if (!match) continue;
+                    }
+
+                    result.Add(new
+                    {
+                        medicalRecordId = r.MedicalRecordId,
+                        appointmentId = r.AppointmentId,
+                        patientId = r.PatientId,
+                        patientName = patientName,
+                        phoneNumber = phone,
+                        gender = patient?.Gender ?? "",
+                        dateOfBirth = patient?.DateOfBirth?.ToString("dd/MM/yyyy") ?? "",
+                        doctorId = r.DoctorId,
+                        doctorName = doctorName,
+                        examinationDate = r.ExaminationDate.ToString("dd/MM/yyyy HH:mm"),
+                        bloodPressure = r.BloodPressure ?? "",
+                        pulse = r.HeartRate?.ToString() ?? "",
+                        temperature = r.Temperature?.ToString() ?? "",
+                        weight = r.Weight?.ToString() ?? "",
+                        height = r.Height?.ToString() ?? "",
+                        bmi = r.Bmi?.ToString() ?? "",
+                        symptoms = r.Symptoms ?? "",
+                        diagnosis = r.Diagnosis ?? "",
+                        icdCode = r.IcdCode ?? "",
+                        icdDescription = r.IcdDescription ?? "",
+                        treatmentPlan = r.TreatmentPlan ?? "",
+                        doctorNote = r.DoctorNote ?? "",
+                        status = r.Status,
+                        prescriptionsSummary = presSummary,
+                        prescriptionId = rx?.PrescriptionId ?? 0,
+                        prescriptionStatus = rx?.Status ?? ""
+                    });
+                }
+
+                return Ok(result);
+            }
+            catch (Exception ex)
+            {
+                return StatusCode(500, new { message = ex.Message });
+            }
+        }
+
+        // =========================================================================
+        // [Old code - GetMedicalRecordsByPatient chỉ trả về mảng phẳng thô của bảng MedicalRecords]:
+        // [HttpGet("patient/{patientId}")]
+        // public async Task<IActionResult> GetMedicalRecordsByPatient(int patientId)
+        // {
+        //     try
+        //     {
+        //         var records = await _context.MedicalRecords
+        //             .Where(r => r.PatientId == patientId)
+        //             .OrderByDescending(r => r.ExaminationDate)
+        //             .ToListAsync();
+        // 
+        //         return Ok(records);
+        //     }
+        //     catch (Exception ex)
+        //     {
+        //         return StatusCode(500, new { message = ex.Message });
+        //     }
+        // }
+        // =========================================================================
+
+        // [New code - GET /api/MedicalRecords/patient/{patientId}: Trả về đầy đủ dữ liệu 5 danh mục cho Mobile App]:
+        [HttpGet("patient/{patientId}")]
+        public async Task<IActionResult> GetMedicalRecordsByPatient(int patientId)
+        {
+            try
+            {
+                var records = await _context.MedicalRecords
+                    .AsNoTracking()
+                    .Where(r => r.PatientId == patientId)
+                    .OrderByDescending(r => r.ExaminationDate)
+                    .ToListAsync();
+
+                var recordIds = records.Select(r => r.MedicalRecordId).ToList();
+                var appointmentIds = records.Select(r => r.AppointmentId).Distinct().ToList();
+
+                var appts = await _context.Appointments
+                    .AsNoTracking()
+                    .Where(a => a.PatientId == patientId || appointmentIds.Contains(a.AppointmentId))
+                    .ToListAsync();
+                var allApptIds = appts.Select(a => a.AppointmentId).Union(appointmentIds).Distinct().ToList();
+
+                var patient = await _context.Patients
+                    .AsNoTracking()
+                    .FirstOrDefaultAsync(p => p.PatientId == patientId);
+                string patientName = patient?.FullName ?? "Bệnh nhân";
+
+                var doctorIds = records.Select(r => r.DoctorId).Union(appts.Select(a => a.DoctorId)).Distinct().ToList();
+                var doctors = await _context.Doctors
+                    .AsNoTracking()
+                    .Where(d => doctorIds.Contains(d.DoctorId))
+                    .ToDictionaryAsync(d => d.DoctorId);
+
+                var specialtyIds = doctors.Values.Where(d => d.SpecialtyId.HasValue).Select(d => d.SpecialtyId!.Value).Distinct().ToList();
+                var specialties = await _context.Specialties
+                    .AsNoTracking()
+                    .Where(s => specialtyIds.Contains(s.SpecialtyId))
+                    .ToDictionaryAsync(s => s.SpecialtyId);
+
+                var prescriptions = await _context.Prescriptions
+                    .AsNoTracking()
+                    .Where(p => p.PatientId == patientId || recordIds.Contains(p.MedicalRecordId))
+                    .OrderByDescending(p => p.CreatedAt)
+                    .ToListAsync();
+
+                var pIds = prescriptions.Select(p => p.PrescriptionId).ToList();
+                var prescriptionDetails = await _context.PrescriptionDetails
+                    .AsNoTracking()
+                    .Where(d => pIds.Contains(d.PrescriptionId))
+                    .ToListAsync();
+                var detailsByPrescriptionId = prescriptionDetails
+                    .GroupBy(d => d.PrescriptionId)
+                    .ToDictionary(g => g.Key, g => g.ToList());
+
+                var medicalTests = await _context.MedicalTests
+                    .AsNoTracking()
+                    .Where(t => recordIds.Contains(t.MedicalRecordId))
+                    .OrderByDescending(t => t.CreatedAt)
+                    .ToListAsync();
+
+                var ultrasoundResults = await _context.UltrasoundResults
+                    .AsNoTracking()
+                    .Where(u => recordIds.Contains(u.MedicalRecordId))
+                    .OrderByDescending(u => u.CreatedAt)
+                    .ToListAsync();
+
+                var invoices = await _context.Invoices
+                    .AsNoTracking()
+                    .Where(i => i.PatientId == patientId || allApptIds.Contains(i.AppointmentId))
+                    .OrderByDescending(i => i.CreatedAt)
+                    .ToListAsync();
+
+                var invIds = invoices.Select(i => i.InvoiceId).ToList();
+                var invoiceItems = await _context.InvoiceItems
+                    .AsNoTracking()
+                    .Where(item => invIds.Contains(item.InvoiceId))
+                    .ToListAsync();
+                var itemsByInvoiceId = invoiceItems
+                    .GroupBy(item => item.InvoiceId)
+                    .ToDictionary(g => g.Key, g => g.ToList());
+
+                string GetDoctorName(int docId)
+                {
+                    if (doctors.TryGetValue(docId, out var doc))
+                    {
+                        string deg = !string.IsNullOrWhiteSpace(doc.Degree) ? doc.Degree.Trim() : "BS.";
+                        return $"{deg} {doc.FullName}".Trim();
+                    }
+                    return "Bác sĩ";
+                }
+
+                string GetSpecialtyName(int docId, int apptId)
+                {
+                    if (doctors.TryGetValue(docId, out var doc) && doc.SpecialtyId.HasValue && specialties.TryGetValue(doc.SpecialtyId.Value, out var spec))
+                    {
+                        return spec.SpecialtyName;
+                    }
+                    var appt = appts.FirstOrDefault(a => a.AppointmentId == apptId);
+                    if (appt != null && !string.IsNullOrEmpty(appt.Reason) && !appt.Reason.Contains(":"))
+                    {
+                        return appt.Reason;
+                    }
+                    return "Chuyên khoa";
+                }
+
+                // 1. Phieu kham
+                var phieuKhamList = records.Select(r =>
+                {
+                    var docName = GetDoctorName(r.DoctorId);
+                    var specName = GetSpecialtyName(r.DoctorId, r.AppointmentId);
+                    var rx = prescriptions.FirstOrDefault(p => p.MedicalRecordId == r.MedicalRecordId);
+                    var details = rx != null && detailsByPrescriptionId.TryGetValue(rx.PrescriptionId, out var dList) ? dList : new List<PrescriptionDetail>();
+                    var rxItems = details.Select(d => new
+                    {
+                        name = $"{d.MedicineNameSnapshot} - SL: {d.Quantity} {d.UnitSnapshot}",
+                        usage = $"Liều: {d.Dosage}, {d.Frequency}. {d.UsageInstruction}".Trim()
+                    }).ToList();
+
+                    return new
+                    {
+                        id = r.MedicalRecordId,
+                        medicalRecordId = r.MedicalRecordId,
+                        appointmentId = r.AppointmentId,
+                        patientId = r.PatientId,
+                        patientName = patientName,
+                        code = $"PK-{r.ExaminationDate:yyyyMMdd}-{r.MedicalRecordId:D3}",
+                        date = r.ExaminationDate.ToString("dd/MM/yyyy HH:mm"),
+                        specialtyName = specName,
+                        clinicKey = specName,
+                        doctor = docName,
+                        doctorId = r.DoctorId,
+                        symptoms = r.Symptoms ?? "",
+                        diagnosis = r.Diagnosis ?? "",
+                        conclusion = r.Conclusion ?? "",
+                        treatmentPlan = r.TreatmentPlan ?? "",
+                        doctorNote = r.DoctorNote ?? "",
+                        bloodPressure = r.BloodPressure ?? "",
+                        heartRate = r.HeartRate,
+                        temperature = r.Temperature,
+                        weight = r.Weight,
+                        height = r.Height,
+                        bmi = r.Bmi,
+                        icdCode = r.IcdCode ?? "",
+                        icdDescription = r.IcdDescription ?? "",
+                        status = r.Status,
+                        prescriptionItems = rxItems
+                    };
+                }).ToList();
+
+                // 2. Toa thuoc
+                var toaThuocList = prescriptions.Select(rx =>
+                {
+                    var rec = records.FirstOrDefault(r => r.MedicalRecordId == rx.MedicalRecordId);
+                    int docId = rx.DoctorId > 0 ? rx.DoctorId : (rec?.DoctorId ?? 0);
+                    int apptId = rec?.AppointmentId ?? 0;
+                    var docName = GetDoctorName(docId);
+                    var specName = GetSpecialtyName(docId, apptId);
+                    var details = detailsByPrescriptionId.TryGetValue(rx.PrescriptionId, out var dList) ? dList : new List<PrescriptionDetail>();
+
+                    string summary = details.Count > 0
+                        ? string.Join(", ", details.Select(d => $"{d.MedicineNameSnapshot} ({d.Quantity} {d.UnitSnapshot})"))
+                        : (rx.Note ?? "Đơn thuốc theo chỉ định");
+
+                    var rxItems = details.Select(d => new
+                    {
+                        name = $"{d.MedicineNameSnapshot} ({d.Quantity} {d.UnitSnapshot})",
+                        usage = $"Liều: {d.Dosage}, {d.Frequency}. {d.UsageInstruction}".Trim()
+                    }).ToList();
+
+                    string dispensedBy = "DS. Trịnh Mai Phương";
+                    string pharmacistNote = "";
+                    if (!string.IsNullOrEmpty(rx.Note))
+                    {
+                        var m = System.Text.RegularExpressions.Regex.Match(rx.Note, @"\[(?:Đã phát bởi\s+|Đã cấp phát bởi\s+|Dược sĩ ghi chú:\s+|Dược sĩ:\s+|Dược sĩ\s+)?([^\]:]+)\](?:\s*:\s*(.+))?");
+                        if (m.Success)
                         {
-                            slotId = result.GetInt32(0);
-                            docId = result.GetInt32(1);
+                            string rawName = m.Groups[1].Value.Trim();
+                            if (!string.IsNullOrEmpty(rawName) && rawName != "Dược sĩ" && rawName != "Dược sĩ ghi chú")
+                            {
+                                dispensedBy = rawName.StartsWith("DS") || rawName.StartsWith("Dược sĩ") ? rawName : $"DS. {rawName}";
+                            }
+                            if (m.Groups.Count > 2 && !string.IsNullOrWhiteSpace(m.Groups[2].Value))
+                            {
+                                pharmacistNote = m.Groups[2].Value.Trim();
+                            }
+                        }
+                        else
+                        {
+                            pharmacistNote = rx.Note.Trim();
                         }
                     }
-                }
-            }
-            catch { /* fallback if table structure differs */ }
 
-            var newAppt = new Appointment
-            {
-                PatientId = patientId,
-                DoctorId = docId,
-                SlotId = slotId,
-                Reason = "Khám tổng quát (Auto-seeded)",
-                StatusId = 4, // Status 4 = Completed
-                IsActive = false, // Must be false for historical records to bypass idx_appointments_slot_active
-                QueueNumber = new Random().Next(1, 100),
-                CreatedAt = DateTime.UtcNow
-            };
-            _context.Appointments.Add(newAppt);
-            await _context.SaveChangesAsync();
-
-            var record1 = new MedicalRecord
-            {
-                PatientId = patientId,
-                DoctorId = docId,
-                AppointmentId = newAppt.AppointmentId,
-                ExaminationDate = DateTime.UtcNow.AddDays(-14),
-                Symptoms = "Đau đầu, mệt mỏi, ho khan",
-                Diagnosis = "Viêm họng cấp / Suy nhược cơ thể",
-                Conclusion = "Nghỉ ngơi, uống thuốc theo toa, theo dõi nhiệt độ",
-                TreatmentPlan = "Điều trị ngoại trú 5 ngày",
-                Status = "Completed",
-                CreatedAt = DateTime.UtcNow.AddDays(-14),
-                UpdatedAt = DateTime.UtcNow.AddDays(-14)
-            };
-            _context.MedicalRecords.Add(record1);
-            await _context.SaveChangesAsync();
-
-            var test1 = new MedicalTest
-            {
-                MedicalRecordId = record1.MedicalRecordId,
-                TestName = "Xét nghiệm công thức máu tổng quát (CBC)",
-                TestType = "Máu",
-                ResultValue = "Bình thường (Hồng cầu: 4.5 T/L, Bạch cầu: 7.2 G/L)",
-                ResultStatus = "Normal", // Valid values: 'Pending', 'Normal', 'Abnormal'
-                PerformedAt = DateTime.UtcNow.AddDays(-14),
-                CreatedAt = DateTime.UtcNow.AddDays(-14)
-            };
-            _context.MedicalTests.Add(test1);
-
-            var uls1 = new UltrasoundResult
-            {
-                MedicalRecordId = record1.MedicalRecordId,
-                UltrasoundType = "Siêu âm tổng quát vùng cổ & tuyến giáp",
-                Description = "Tuyến giáp kích thước bình thường, không có hạch bất thường",
-                Conclusion = "Không phát hiện khối u hoặc tổn thương bất thường",
-                PerformedAt = DateTime.UtcNow.AddDays(-14),
-                CreatedAt = DateTime.UtcNow.AddDays(-14)
-            };
-            _context.UltrasoundResults.Add(uls1);
-
-            var rx1 = new Prescription
-            {
-                MedicalRecordId = record1.MedicalRecordId,
-                DoctorId = docId,
-                PatientId = patientId,
-                Status = "Completed",
-                Note = "Uống sau ăn 30 phút, tránh nước đá",
-                CreatedAt = DateTime.UtcNow.AddDays(-14)
-            };
-            _context.Prescriptions.Add(rx1);
-            await _context.SaveChangesAsync();
-
-            var medIds = await _context.Medicines.Select(m => m.MedicineId).Take(3).ToListAsync();
-            if (medIds.Count == 0)
-            {
-                var newMed = new Medicine { CategoryId = 1, MedicineName = "Amoxicillin 500mg", Unit = "Viên", Status = "Active" };
-                _context.Medicines.Add(newMed);
-                await _context.SaveChangesAsync();
-                medIds.Add(newMed.MedicineId);
-            }
-            while (medIds.Count < 3) medIds.Add(medIds[0]);
-
-            _context.PrescriptionDetails.AddRange(
-                new PrescriptionDetail { PrescriptionId = rx1.PrescriptionId, MedicineId = medIds[0], MedicineNameSnapshot = "Amoxicillin 500mg", UnitSnapshot = "Viên", Quantity = 20, Dosage = "500mg", Frequency = "2 lần/ngày", Duration = "10 ngày", UsageInstruction = "Uống sau ăn 30 phút" },
-                new PrescriptionDetail { PrescriptionId = rx1.PrescriptionId, MedicineId = medIds[1], MedicineNameSnapshot = "Paracetamol 500mg", UnitSnapshot = "Viên", Quantity = 10, Dosage = "500mg", Frequency = "Khi sốt", Duration = "5 ngày", UsageInstruction = "Uống khi sốt cao > 38.5°C" },
-                new PrescriptionDetail { PrescriptionId = rx1.PrescriptionId, MedicineId = medIds[2], MedicineNameSnapshot = "Vitamin C 1000mg", UnitSnapshot = "Hộp", Quantity = 1, Dosage = "1000mg", Frequency = "1 lần/ngày", Duration = "10 ngày", UsageInstruction = "Pha với 200ml nước ấm" }
-            );
-
-            var inv1 = new Invoice
-            {
-                AppointmentId = newAppt.AppointmentId,
-                PatientId = patientId,
-                TotalAmount = 450000,
-                PaidAmount = 450000,
-                PaymentStatus = "paid",
-                PaymentMethod = "Thanh toán qua app",
-                InvoiceDate = DateTime.UtcNow.AddDays(-14),
-                CreatedAt = DateTime.UtcNow.AddDays(-14)
-            };
-            _context.Invoices.Add(inv1);
-
-            await _context.SaveChangesAsync();
-        }
-        catch
-        {
-            // Suppress seed errors if foreign key references do not match in clean DB
-        }
-    }
-
-    // POST /api/MedicalRecords
-    [HttpPost]
-    public async Task<IActionResult> CreateMedicalRecord([FromBody] CreateMedicalRecordDto dto)
-    {
-        // Chỉ Bác sĩ/nhân viên mới được tạo hồ sơ khám bệnh — hành động này thật sự trừ tồn kho
-        // thuốc và tạo hóa đơn, bệnh nhân không được tự bịa hồ sơ khám cho bất kỳ ai.
-        if (!AccessControl.IsStaff(User)) return this.ForbidJson();
-        // Trước đây DoctorId/MedicineId không hợp lệ (<=0, vd do TokenVault.DoctorId chưa kịp nạp) bị âm
-        // thầm thay bằng "#1" thay vì báo lỗi — hồ sơ khám/đơn thuốc có thể bị gắn nhầm cho bác sĩ/thuốc
-        // hoàn toàn khác, và trừ tồn kho nhầm thuốc #1 thay vì thuốc bác sĩ thực sự kê.
-        if (dto.DoctorId <= 0)
-            return BadRequest(new { success = false, message = "Thiếu thông tin bác sĩ khám (DoctorId không hợp lệ)." });
-        if (dto.Prescriptions != null && dto.Prescriptions.Any(p => p.MedicineId <= 0))
-            return BadRequest(new { success = false, message = "Có thuốc trong đơn thiếu MedicineId hợp lệ." });
-        try
-        {
-            // 1. Tái sử dụng phiếu khám Draft đã tạo sẵn (vd: do đã chỉ định CLS qua
-            //    ClinicalOrdersController trước khi hoàn tất khám) thay vì tạo trùng bản ghi mới.
-            var record = await _context.MedicalRecords.FirstOrDefaultAsync(r => r.AppointmentId == dto.AppointmentId);
-            bool isNewRecord = record == null;
-            if (record == null) record = new MedicalRecord { AppointmentId = dto.AppointmentId, CreatedAt = DateTime.UtcNow };
-
-            record.PatientId = dto.PatientId;
-            record.DoctorId = dto.DoctorId;
-            record.Symptoms = dto.Symptoms;
-            record.Diagnosis = dto.Diagnosis;
-            record.IcdCode = dto.IcdCode;
-            record.IcdDescription = dto.IcdDescription;
-            record.TreatmentPlan = dto.TreatmentPlan;
-            record.BloodPressure = dto.BloodPressure;
-            record.DoctorNote = $"Lưu lúc {DateTime.Now:HH:mm dd/MM/yyyy}";
-            record.ExaminationDate = DateTime.UtcNow;
-            record.Status = "Completed";
-            record.UpdatedAt = DateTime.UtcNow;
-
-            if (decimal.TryParse(dto.Temperature, out decimal temp)) record.Temperature = temp;
-            if (decimal.TryParse(dto.Weight, out decimal w)) record.Weight = w;
-            if (decimal.TryParse(dto.Height, out decimal h)) record.Height = h;
-            if (int.TryParse(dto.Pulse, out int pulse)) record.HeartRate = pulse;
-
-            if (record.Height > 0 && record.Weight > 0)
-            {
-                decimal hM = record.Height.Value / 100m;
-                record.Bmi = Math.Round(record.Weight.Value / (hM * hM), 1);
-            }
-
-            if (isNewRecord) _context.MedicalRecords.Add(record);
-            await _context.SaveChangesAsync();
-
-            // Tự động trừ tồn kho thuốc khi bác sĩ kê đơn — nếu không đủ hàng, trừ về 0 và
-            // ghi nhận lại để báo cho bác sĩ biết (KHÔNG chặn lưu đơn, chỉ cảnh báo).
-            var insufficientStock = new List<string>();
-
-            // 2. Create Prescription if drugs exist
-            if (dto.Prescriptions != null && dto.Prescriptions.Count > 0)
-            {
-                var prescription = new Prescription
-                {
-                    MedicalRecordId = record.MedicalRecordId,
-                    DoctorId = record.DoctorId,
-                    PatientId = dto.PatientId,
-                    Status = "Active",
-                    Note = "Đơn thuốc điện tử",
-                    CreatedAt = DateTime.UtcNow,
-                    UpdatedAt = DateTime.UtcNow
-                };
-                _context.Prescriptions.Add(prescription);
-                await _context.SaveChangesAsync();
-
-                foreach (var drug in dto.Prescriptions)
-                {
-                    var detail = new PrescriptionDetail
+                    return new
                     {
-                        PrescriptionId = prescription.PrescriptionId,
-                        MedicineId = drug.MedicineId,
-                        MedicineNameSnapshot = drug.MedicineName,
-                        UnitSnapshot = drug.Unit,
-                        Quantity = drug.Quantity,
-                        Dosage = drug.Dosage ?? "500mg",
-                        Frequency = drug.Frequency ?? "2 lần/ngày",
-                        Duration = "7 ngày",
-                        UsageInstruction = drug.UsageInstruction,
+                        id = rx.PrescriptionId,
+                        prescriptionId = rx.PrescriptionId,
+                        medicalRecordId = rx.MedicalRecordId,
+                        appointmentId = apptId,
+                        code = $"DT-{rx.CreatedAt:yyyyMMdd}-{rx.PrescriptionId:D3}",
+                        date = rx.CreatedAt.ToString("dd/MM/yyyy"),
+                        patientName = patientName,
+                        doctor = docName,
+                        specialtyName = specName,
+                        clinicKey = specName,
+                        items = summary,
+                        treatmentPlan = rec?.TreatmentPlan ?? "Uống thuốc đúng giờ, đúng liều theo chỉ dẫn.",
+                        prescriptionItems = rxItems,
+                        status = rx.Status,
+                        note = rx.Note ?? "",
+                        pharmacistName = dispensedBy,
+                        pharmacistNote = !string.IsNullOrEmpty(pharmacistNote) ? pharmacistNote : "Uống thuốc đúng liều lượng, đúng giờ theo chỉ dẫn. Bảo quản thuốc nơi khô ráo, thoáng mát."
+                    };
+                }).ToList();
+
+                // 3. Xet nghiem
+                var xetNghiemList = medicalTests.Select(t =>
+                {
+                    var rec = records.FirstOrDefault(r => r.MedicalRecordId == t.MedicalRecordId);
+                    int docId = rec?.DoctorId ?? 0;
+                    int apptId = rec?.AppointmentId ?? 0;
+                    var docName = GetDoctorName(docId);
+                    var specName = GetSpecialtyName(docId, apptId);
+                    var testDate = t.PerformedAt ?? t.CreatedAt;
+
+                    string resultDisplay = !string.IsNullOrWhiteSpace(t.ResultValue)
+                        ? t.ResultValue
+                        : (t.ResultStatus == "Pending" ? "Đang chờ kết quả" : (t.ResultStatus == "Normal" ? "Bình thường" : (t.ResultStatus == "Abnormal" ? "Bất thường" : t.ResultStatus)));
+
+                    return new
+                    {
+                        id = t.TestId,
+                        testId = t.TestId,
+                        medicalRecordId = t.MedicalRecordId,
+                        appointmentId = apptId,
+                        code = $"XN-{t.CreatedAt:yyyyMMdd}-{t.TestId:D3}",
+                        date = testDate.ToString("dd/MM/yyyy"),
+                        type = t.TestName,
+                        testType = t.TestType ?? "Laboratory",
+                        result = resultDisplay,
+                        status = t.ResultStatus,
+                        unit = t.Unit ?? "",
+                        referenceRange = t.ReferenceRange ?? "",
+                        patientName = patientName,
+                        doctor = docName,
+                        specialtyName = specName,
+                        clinicKey = "Xét nghiệm",
+                        clinicalNote = t.ClinicalNote ?? "",
+                        resultFileUrl = t.ResultFileUrl ?? ""
+                    };
+                }).ToList();
+
+                // 4. Sieu am
+                var sieuAmList = ultrasoundResults.Select(u =>
+                {
+                    var rec = records.FirstOrDefault(r => r.MedicalRecordId == u.MedicalRecordId);
+                    int docId = rec?.DoctorId ?? 0;
+                    int apptId = rec?.AppointmentId ?? 0;
+                    var docName = GetDoctorName(docId);
+                    var specName = GetSpecialtyName(docId, apptId);
+                    var usDate = u.PerformedAt ?? u.CreatedAt;
+
+                    string resultDisplay = !string.IsNullOrWhiteSpace(u.Conclusion)
+                        ? u.Conclusion
+                        : (!string.IsNullOrWhiteSpace(u.Description)
+                            ? u.Description
+                            : (u.ResultStatus == "Pending" ? "Đang chờ kết quả" : (u.ResultStatus == "Completed" ? "Đã hoàn tất" : u.ResultStatus)));
+
+                    return new
+                    {
+                        id = u.UltrasoundId,
+                        ultrasoundId = u.UltrasoundId,
+                        medicalRecordId = u.MedicalRecordId,
+                        appointmentId = apptId,
+                        code = $"SA-{u.CreatedAt:yyyyMMdd}-{u.UltrasoundId:D3}",
+                        date = usDate.ToString("dd/MM/yyyy"),
+                        type = u.UltrasoundType ?? "Siêu âm",
+                        result = resultDisplay,
+                        status = u.ResultStatus,
+                        imageUrls = u.ImageUrls ?? Array.Empty<string>(),
+                        patientName = patientName,
+                        doctor = docName,
+                        specialtyName = specName,
+                        clinicKey = "Chẩn đoán hình ảnh",
+                        clinicalNote = u.ClinicalNote ?? ""
+                    };
+                }).ToList();
+
+                // 5. Hoa don
+                var hoaDonList = invoices.Select(inv =>
+                {
+                    var rec = records.FirstOrDefault(r => r.AppointmentId == inv.AppointmentId);
+                    int docId = rec?.DoctorId ?? 0;
+                    var docName = docId > 0 ? GetDoctorName(docId) : "Bác sĩ";
+                    var specName = docId > 0 ? GetSpecialtyName(docId, inv.AppointmentId) : "Quầy thu ngân";
+
+                    var items = itemsByInvoiceId.TryGetValue(inv.InvoiceId, out var iList) ? iList : new List<InvoiceItem>();
+                    string summary = items.Count > 0
+                        ? string.Join(", ", items.Select(i => i.ItemName))
+                        : $"Hóa đơn viện phí ({inv.TotalAmount:N0}đ)";
+
+                    var formattedItems = items.Select(i => new
+                    {
+                        name = i.ItemName,
+                        amount = i.Amount
+                    }).ToList();
+
+                    return new
+                    {
+                        id = inv.InvoiceId,
+                        invoiceId = inv.InvoiceId,
+                        appointmentId = inv.AppointmentId,
+                        code = $"HD-{inv.CreatedAt:yyyyMMdd}-{inv.InvoiceId:D3}",
+                        date = inv.InvoiceDate.ToString("dd/MM/yyyy"),
+                        totalAmount = inv.TotalAmount,
+                        paidAmount = inv.PaidAmount,
+                        paymentStatus = inv.PaymentStatus,
+                        paymentMethod = inv.PaymentMethod ?? "cash",
+                        patientName = patientName,
+                        doctor = docName,
+                        specialtyName = specName,
+                        clinicKey = specName,
+                        items = summary,
+                        invoiceItems = formattedItems
+                    };
+                }).ToList();
+
+                return Ok(new
+                {
+                    phieu_kham = phieuKhamList,
+                    toa_thuoc = toaThuocList,
+                    xet_nghiem = xetNghiemList,
+                    sieu_am = sieuAmList,
+                    hoa_don = hoaDonList
+                });
+            }
+            catch (Exception ex)
+            {
+                var msg = ex.InnerException != null ? $"{ex.Message} --> {ex.InnerException.Message}" : ex.Message;
+                if (ex.InnerException?.InnerException != null) msg += $" --> {ex.InnerException.InnerException.Message}";
+                return StatusCode(500, new { message = msg });
+            }
+        }
+
+        // GET /api/MedicalRecords/appointment/{appointmentId}
+        [HttpGet("appointment/{appointmentId}")]
+        public async Task<IActionResult> GetMedicalRecordByAppointment(int appointmentId)
+        {
+            try
+            {
+                var record = await _context.MedicalRecords
+                    .FirstOrDefaultAsync(r => r.AppointmentId == appointmentId);
+
+                if (record == null)
+                {
+                    return NotFound(new { message = "KhÃ´ng tÃ¬m tháº¥y há»“ sÆ¡ bá»‡nh Ã¡n." });
+                }
+
+                var prescriptions = await _context.Prescriptions
+                    .Where(p => p.MedicalRecordId == record.MedicalRecordId)
+                    .ToListAsync();
+
+                var pIds = prescriptions.Select(p => p.PrescriptionId).ToList();
+                var prescriptionDetails = await _context.PrescriptionDetails
+                    .Where(d => pIds.Contains(d.PrescriptionId))
+                    .ToListAsync();
+
+                return Ok(new
+                {
+                    medicalRecord = record,
+                    prescriptions = prescriptions,
+                    prescriptionDetails = prescriptionDetails
+                });
+            }
+            catch (Exception ex)
+            {
+                return StatusCode(500, new { message = ex.Message });
+            }
+        }
+
+        // POST /api/MedicalRecords
+        [HttpPost]
+        public async Task<IActionResult> CreateMedicalRecord([FromBody] CreateMedicalRecordDto dto)
+        {
+            if (dto == null)
+            {
+                return BadRequest(new { message = "Dá»¯ liá»‡u khÃ´ng há»£p lá»‡." });
+            }
+
+            try
+            {
+                var record = await _context.MedicalRecords.FirstOrDefaultAsync(r => r.AppointmentId == dto.AppointmentId);
+                if (record == null)
+                {
+                    record = new MedicalRecord
+                    {
+                        AppointmentId = dto.AppointmentId,
+                        PatientId = dto.PatientId,
+                        DoctorId = dto.DoctorId,
+                        ExaminationDate = DateTime.UtcNow,
+                        Status = "Completed",
                         CreatedAt = DateTime.UtcNow,
                         UpdatedAt = DateTime.UtcNow
                     };
-                    _context.PrescriptionDetails.Add(detail);
+                    _context.MedicalRecords.Add(record);
                 }
-                await _context.SaveChangesAsync();
 
-                // Trừ tồn kho thật theo đơn vừa kê
-                var medIdsForStock = dto.Prescriptions.Select(p => p.MedicineId > 0 ? p.MedicineId : 1).Distinct().ToList();
-                var medsForStock = await _context.Medicines.Where(m => medIdsForStock.Contains(m.MedicineId)).ToDictionaryAsync(m => m.MedicineId);
-                foreach (var drug in dto.Prescriptions)
+                record.Symptoms = dto.Symptoms;
+                record.Diagnosis = dto.Diagnosis;
+                record.IcdCode = dto.IcdCode;
+                record.IcdDescription = dto.IcdDescription;
+                record.TreatmentPlan = dto.TreatmentPlan;
+                record.UpdatedAt = DateTime.UtcNow;
+
+                if (!string.IsNullOrWhiteSpace(dto.Pulse) && int.TryParse(dto.Pulse, out var p)) record.HeartRate = p;
+                if (!string.IsNullOrWhiteSpace(dto.BloodPressure)) record.BloodPressure = dto.BloodPressure;
+                if (!string.IsNullOrWhiteSpace(dto.Temperature) && decimal.TryParse(dto.Temperature, out var t)) record.Temperature = t;
+                if (!string.IsNullOrWhiteSpace(dto.Weight) && decimal.TryParse(dto.Weight, out var w)) record.Weight = w;
+                if (!string.IsNullOrWhiteSpace(dto.Height) && decimal.TryParse(dto.Height, out var h)) record.Height = h;
+
+                if (record.Weight.HasValue && record.Height.HasValue && record.Height.Value > 0)
                 {
-                    int mid = drug.MedicineId > 0 ? drug.MedicineId : 1;
-                    if (!medsForStock.TryGetValue(mid, out var med)) continue;
-
-                    if (med.StockQuantity < drug.Quantity)
-                    {
-                        insufficientStock.Add($"{med.MedicineName} (còn {med.StockQuantity} {med.Unit}, cần {drug.Quantity})");
-                        med.StockQuantity = 0;
-                    }
-                    else
-                    {
-                        med.StockQuantity -= drug.Quantity;
-                    }
-                    med.UpdatedAt = DateTime.UtcNow;
+                    decimal hMeter = record.Height.Value / 100m;
+                    record.Bmi = Math.Round(record.Weight.Value / (hMeter * hMeter), 1);
                 }
-                await _context.SaveChangesAsync();
-            }
 
-            // 3. Update appointment status to Completed (4)
-            var appt = await _context.Appointments.FirstOrDefaultAsync(a => a.AppointmentId == dto.AppointmentId);
-            if (appt != null)
-            {
-                appt.StatusId = 4; // 4 = Completed
-                appt.UpdatedAt = DateTime.UtcNow;
                 await _context.SaveChangesAsync();
-            }
 
-            // 4. Tao Invoice PENDING (cho thu phi) - khong tao invoice da thanh toan
-            // Le tan phai bam "Xac nhan thu tien" moi chuyen sang "paid" va hien tren App Mobile
-            var existingInvoice = await _context.Invoices.FirstOrDefaultAsync(i => i.AppointmentId == dto.AppointmentId);
-            if (existingInvoice == null)
-            {
-                // Tinh tong tien tu don thuoc (uoc tinh 15.000/vien - Medicine entity chua co truong Price)
-                decimal medFee = 0;
+                // 2. Táº¡o Prescription
+                var insufficientStock = new List<string>();
                 if (dto.Prescriptions != null && dto.Prescriptions.Count > 0)
                 {
-                    var medIds = dto.Prescriptions.Select(p => p.MedicineId).ToList();
-                    var medDict = await _context.Medicines.Where(m => medIds.Contains(m.MedicineId)).ToDictionaryAsync(m => m.MedicineId);
-                    foreach (var presc in dto.Prescriptions)
+                    var prescription = new Prescription
                     {
-                        decimal price = medDict.ContainsKey(presc.MedicineId) ? medDict[presc.MedicineId].Price : 15000m;
-                        if (price <= 0) price = 15000m;
-                        medFee += price * presc.Quantity;
+                        MedicalRecordId = record.MedicalRecordId,
+                        DoctorId = dto.DoctorId,
+                        PatientId = dto.PatientId,
+                        Status = "Active",
+                        // [Old code]: Note = dto.TreatmentPlan,
+                        // [New code - Cột Note của đơn thuốc chỉ dùng riêng cho Ghi chú của Dược sĩ]:
+                        Note = null,
+                        CreatedAt = DateTime.UtcNow,
+                        UpdatedAt = DateTime.UtcNow
+                    };
+                    _context.Prescriptions.Add(prescription);
+                    await _context.SaveChangesAsync();
+
+                    foreach (var pItem in dto.Prescriptions)
+                    {
+                        _context.PrescriptionDetails.Add(new PrescriptionDetail
+                        {
+                            PrescriptionId = prescription.PrescriptionId,
+                            MedicineId = pItem.MedicineId,
+                            MedicineNameSnapshot = pItem.MedicineName,
+                            UnitSnapshot = pItem.Unit,
+                            Quantity = pItem.Quantity,
+                            Dosage = pItem.Dosage,
+                            Frequency = pItem.Frequency,
+                            Duration = "7 ngày",
+                            UsageInstruction = pItem.UsageInstruction
+                        });
+
+                        var med = await _context.Medicines.FirstOrDefaultAsync(m => m.MedicineId == pItem.MedicineId);
+                        if (med != null)
+                        {
+                            if (med.StockQuantity >= pItem.Quantity)
+                            {
+                                med.StockQuantity -= pItem.Quantity;
+                            }
+                            else
+                            {
+                                insufficientStock.Add(med.MedicineName);
+                            }
+                        }
+                    }
+                    await _context.SaveChangesAsync();
+                }
+
+                // 3. Update appointment status: Náº¿u cÃ³ kÃª Ä‘Æ¡n thuá»‘c -> chuyá»ƒn sang StatusId = 10 (PendingDispensing) Ä‘á»ƒ Dược sĩ phÃ¡t thuá»‘c
+                var appt = await _context.Appointments.FirstOrDefaultAsync(a => a.AppointmentId == dto.AppointmentId);
+                if (appt != null)
+                {
+                    // [Old code]: appt.StatusId = 4; // 4 = Completed
+                    // [New code]:
+                    appt.StatusId = (dto.Prescriptions != null && dto.Prescriptions.Count > 0) ? 10 : 4;
+                    appt.UpdatedAt = DateTime.UtcNow;
+                    await _context.SaveChangesAsync();
+                }
+
+                return Ok(new
+                {
+                    success = true,
+                    medicalRecordId = record.MedicalRecordId,
+                    insufficientStock = insufficientStock
+                });
+            }
+            catch (Exception ex)
+            {
+                var msg = ex.InnerException != null ? $"{ex.Message} --> {ex.InnerException.Message}" : ex.Message;
+                if (ex.InnerException?.InnerException != null) msg += $" --> {ex.InnerException.InnerException.Message}";
+                return StatusCode(500, new { message = msg });
+            }
+        }
+
+        // =========================================================================
+        // â”€â”€ PHÃ‚N Há»† DÆ¯á»¢C SÄ¨ (PHARMACY DISPENSING) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+        // =========================================================================
+
+        // =========================================================================
+        // [Old code - GetPharmacyQueue khÃ´ng lá»c ngÃ y hÃ´m nay]:
+        // [HttpGet("pharmacy-queue")]
+        // public async Task<IActionResult> GetPharmacyQueue()
+        // {
+        //     var appointments = await _context.Appointments.Where(a => a.StatusId == 10).OrderBy(a => a.CreatedAt).ToListAsync();
+        //     ...
+        // }
+        // =========================================================================
+
+        // [New code - GET /api/MedicalRecords/pharmacy-queue: Tối ưu hóa truy vấn hàng loạt (Bulk Query) siêu tốc]:
+        [HttpGet("pharmacy-queue")]
+        public async Task<IActionResult> GetPharmacyQueue([FromQuery] bool todayOnly = true)
+        {
+            try
+            {
+                var query = _context.Appointments
+                    .AsNoTracking()
+                    .Where(a => a.StatusId == 10 || a.StatusId == 3);
+
+                if (todayOnly)
+                {
+                    var nowVn        = DateTime.UtcNow.AddHours(7);
+                    var todayVn      = DateOnly.FromDateTime(nowVn);
+                    var todayVnStart = nowVn.Date.AddHours(-7);
+                    var todayVnEnd   = todayVnStart.AddDays(1);
+                    query = query.Where(a =>
+                        (a.AppointmentDate != null && a.AppointmentDate == todayVn) ||
+                        (a.AppointmentDate == null  && a.CreatedAt >= todayVnStart && a.CreatedAt < todayVnEnd));
+                }
+
+                var appointments = await query
+                    .OrderBy(a => a.CreatedAt)
+                    .ToListAsync();
+
+                if (appointments.Count == 0) return Ok(new List<object>());
+
+                var apptIds = appointments.Select(a => a.AppointmentId).ToList();
+                var patientIds = appointments.Select(a => a.PatientId).Distinct().ToList();
+                var doctorIds = appointments.Select(a => a.DoctorId).Distinct().ToList();
+
+                var records = await _context.MedicalRecords.AsNoTracking().Where(r => apptIds.Contains(r.AppointmentId)).ToListAsync();
+                var recordMap = records.ToDictionary(r => r.AppointmentId, r => r);
+                var recordIds = records.Select(r => r.MedicalRecordId).ToList();
+
+                var prescriptions = await _context.Prescriptions.AsNoTracking().Where(p => recordIds.Contains(p.MedicalRecordId)).ToListAsync();
+                var rxMap = prescriptions.ToDictionary(p => p.MedicalRecordId, p => p);
+                var rxIds = prescriptions.Select(p => p.PrescriptionId).ToList();
+
+                var allDetails = await _context.PrescriptionDetails.AsNoTracking().Where(d => rxIds.Contains(d.PrescriptionId)).ToListAsync();
+                var detailsGroup = allDetails.GroupBy(d => d.PrescriptionId).ToDictionary(g => g.Key, g => g.ToList());
+
+                var docList = await _context.Doctors.AsNoTracking().Where(d => doctorIds.Contains(d.DoctorId)).ToListAsync();
+                var docMap = docList.ToDictionary(d => d.DoctorId, d => d.FullName ?? "Bác sĩ");
+                var docDegreeMap = docList.ToDictionary(d => d.DoctorId, d => d.Degree ?? "Bác sĩ");
+
+                var patientList = await _context.Patients.AsNoTracking().Where(p => patientIds.Contains(p.PatientId)).ToListAsync();
+                var patientMap = patientList.ToDictionary(p => p.PatientId, p => p);
+
+                var medList = await _context.Medicines.AsNoTracking().ToListAsync();
+                var medDict = medList.ToDictionary(m => m.MedicineId, m => m);
+
+                var result = new List<object>();
+
+                foreach (var appt in appointments)
+                {
+                    if (!recordMap.TryGetValue(appt.AppointmentId, out var record)) continue;
+                    if (!rxMap.TryGetValue(record.MedicalRecordId, out var rx)) continue;
+
+                    detailsGroup.TryGetValue(rx.PrescriptionId, out var details);
+                    if (details == null) details = new List<PrescriptionDetail>();
+
+                    patientMap.TryGetValue(appt.PatientId, out var pInfo);
+                    string pName = pInfo?.FullName ?? "Bệnh nhân";
+                    int age = pInfo?.DateOfBirth.HasValue == true ? DateTime.Today.Year - pInfo.DateOfBirth.Value.Year : 30;
+                    string gender = pInfo?.Gender ?? "Nam";
+                    string dName = docMap.ContainsKey(appt.DoctorId) ? docMap[appt.DoctorId] : "BS. Nguyễn Văn A";
+                    string dDegree = docDegreeMap.ContainsKey(appt.DoctorId) ? docDegreeMap[appt.DoctorId] : "Bác sĩ";
+
+                    var drugItems = details.Select(d =>
+                    {
+                        int stock = medDict.ContainsKey(d.MedicineId) ? medDict[d.MedicineId].StockQuantity : 100;
+                        return new
+                        {
+                            prescriptionDetailId = d.PrescriptionDetailId,
+                            medicineId = d.MedicineId,
+                            medicineName = d.MedicineNameSnapshot,
+                            unit = d.UnitSnapshot,
+                            quantity = d.Quantity,
+                            dosage = d.Dosage,
+                            frequency = d.Frequency,
+                            duration = d.Duration,
+                            usageInstruction = d.UsageInstruction,
+                            stockQuantity = stock,
+                            stockStatus = stock >= d.Quantity ? "Khả dụng" : "Hết hàng"
+                        };
+                    }).ToList();
+
+                    result.Add(new
+                    {
+                        appointmentId = appt.AppointmentId,
+                        medicalRecordId = record.MedicalRecordId,
+                        prescriptionId = rx.PrescriptionId,
+                        patientId = appt.PatientId,
+                        patientName = pName,
+                        patientAge = age,
+                        patientGender = gender,
+                        doctorName = dName,
+                        doctorDegree = dDegree,
+                        diagnosis = record.Diagnosis ?? "",
+                        symptoms = record.Symptoms ?? "",
+                        prescriptionNote = rx.Note ?? "",
+                        createdAt = rx.CreatedAt,
+                        timeSlot = !string.IsNullOrEmpty(appt.Reason) && appt.Reason.Contains(":") ? appt.Reason : "14:30 - 15:00",
+                        items = drugItems
+                    });
+                }
+
+                return Ok(result);
+            }
+            catch (Exception ex)
+            {
+                var msg = ex.InnerException != null ? $"{ex.Message} --> {ex.InnerException.Message}" : ex.Message;
+                if (ex.InnerException?.InnerException != null) msg += $" --> {ex.InnerException.InnerException.Message}";
+                return StatusCode(500, new { message = msg });
+            }
+        }
+
+        // =========================================================================
+        // [Old code - GetPharmacyHistory khÃ´ng lá»c tÃ¬m kiáº¿m vÃ  khÃ´ng tráº£ vá» items chi tiáº¿t]:
+        // [HttpGet("pharmacy-history")]
+        // public async Task<IActionResult> GetPharmacyHistory([FromQuery] string? date) { ... }
+        // =========================================================================
+
+        // [New code - GET /api/MedicalRecords/pharmacy-history: Tìm kiếm thông minh theo SĐT, Họ tên, Mã đơn, Bác sĩ, Triệu chứng...]:
+        [HttpGet("pharmacy-history")]
+        public async Task<IActionResult> GetPharmacyHistory([FromQuery] string? date, [FromQuery] string? search)
+        {
+            try
+            {
+                var query = _context.Prescriptions.AsNoTracking().Where(p => p.Status == "Completed" || p.Status == "Dispensed");
+
+                // Nếu có từ khóa tìm kiếm và không chọn "all", nếu tìm kiếm theo ngày không thấy thì sẽ mở rộng tìm kiếm
+                if (!string.IsNullOrEmpty(date) && date != "all")
+                {
+                    if (date == "today")
+                    {
+                        var nowVn        = DateTime.UtcNow.AddHours(7);
+                        var todayVnStart = nowVn.Date.AddHours(-7);
+                        var todayVnEnd   = todayVnStart.AddDays(1);
+                        query = query.Where(p => p.UpdatedAt >= todayVnStart && p.UpdatedAt < todayVnEnd);
+                    }
+                    else if (DateTime.TryParse(date, out var parsedDate))
+                    {
+                        var startUtc = parsedDate.Date.AddHours(-7);
+                        var endUtc   = startUtc.AddDays(1);
+                        query = query.Where(p => p.UpdatedAt >= startUtc && p.UpdatedAt < endUtc);
                     }
                 }
 
-                // Phí Xét nghiệm/Siêu âm đã chỉ định cho phiếu khám này (clinical_services.unit_price qua service_id)
-                var clsServiceIds = new List<int>();
-                clsServiceIds.AddRange(await _context.MedicalTests.Where(t => t.MedicalRecordId == record.MedicalRecordId && t.ServiceId != null).Select(t => t.ServiceId!.Value).ToListAsync());
-                clsServiceIds.AddRange(await _context.UltrasoundResults.Where(u => u.MedicalRecordId == record.MedicalRecordId && u.ServiceId != null).Select(u => u.ServiceId!.Value).ToListAsync());
-                decimal clsFee = 0;
-                if (clsServiceIds.Count > 0)
+                var rxList = await query
+                    .OrderByDescending(p => p.UpdatedAt)
+                    .ToListAsync();
+
+                // Nếu tìm kiếm theo ngày cụ thể mà không có kết quả, tự động tìm kiếm trên toàn bộ lịch sử nếu người dùng có nhập từ khóa
+                if (rxList.Count == 0 && !string.IsNullOrWhiteSpace(search) && date != "all")
                 {
-                    var clsServices = await _context.ClinicalServices.Where(s => clsServiceIds.Contains(s.ServiceId)).ToListAsync();
-                    clsFee = clsServices.Sum(s => s.UnitPrice);
+                    rxList = await _context.Prescriptions.AsNoTracking()
+                        .Where(p => p.Status == "Completed" || p.Status == "Dispensed")
+                        .OrderByDescending(p => p.UpdatedAt)
+                        .ToListAsync();
                 }
 
-                decimal examFee = 250000; // Cong kham chuyen khoa chieu chuot 250.000d
-                decimal totalAmount = examFee + medFee + clsFee;
+                if (rxList.Count == 0) return Ok(new List<object>());
 
-                var pendingInvoice = new Invoice
-                {
-                    AppointmentId = dto.AppointmentId,
-                    PatientId = dto.PatientId,
-                    TotalAmount = totalAmount,
-                    PaidAmount = 0,           // Chua thu tien
-                    // DB chk_payment_status chỉ cho phép 'unpaid'/'partial'/'paid' — KHÔNG có 'pending'.
-                    // PaidAmount=0 ở trên đã đúng nghĩa "unpaid", trước đây dùng "pending" (giá trị không
-                    // hợp lệ) khiến INSERT bị PostgreSQL từ chối (23514) mỗi lần có tạo invoice ở đây.
-                    PaymentStatus = "unpaid", // Le tan chua xac nhan
-                    PaymentMethod = null,
-                    InvoiceDate = DateTime.UtcNow,
-                    CreatedAt = DateTime.UtcNow,
-                    UpdatedAt = DateTime.UtcNow
-                };
-                _context.Invoices.Add(pendingInvoice);
-                await _context.SaveChangesAsync();
+                var rxIds = rxList.Select(r => r.PrescriptionId).ToList();
+                var recordIds = rxList.Select(r => r.MedicalRecordId).Distinct().ToList();
+                var patientIds = rxList.Select(r => r.PatientId).Distinct().ToList();
+                var doctorIds = rxList.Select(r => r.DoctorId).Distinct().ToList();
 
-                _context.InvoiceItems.Add(new InvoiceItem
+                var records = await _context.MedicalRecords.AsNoTracking().Where(r => recordIds.Contains(r.MedicalRecordId)).ToListAsync();
+                var recordMap = records.ToDictionary(r => r.MedicalRecordId, r => r);
+
+                var allDetails = await _context.PrescriptionDetails.AsNoTracking().Where(d => rxIds.Contains(d.PrescriptionId)).ToListAsync();
+                var detailsGroup = allDetails.GroupBy(d => d.PrescriptionId).ToDictionary(g => g.Key, g => g.ToList());
+
+                var docList = await _context.Doctors.AsNoTracking().Where(d => doctorIds.Contains(d.DoctorId)).ToListAsync();
+                var docMap = docList.ToDictionary(d => d.DoctorId, d => d.FullName ?? "Bác sĩ");
+                var docDegreeMap = docList.ToDictionary(d => d.DoctorId, d => d.Degree ?? "Bác sĩ");
+
+                var patientList = await _context.Patients.AsNoTracking().Where(p => patientIds.Contains(p.PatientId)).ToListAsync();
+                var patientMap = patientList.ToDictionary(p => p.PatientId, p => p);
+
+                var userList = await _context.Users.AsNoTracking().ToListAsync();
+                var userPhoneMap = userList.ToDictionary(u => u.UserId, u => u.PhoneNumber ?? "");
+
+                var medList = await _context.Medicines.AsNoTracking().ToListAsync();
+                var medDict = medList.ToDictionary(m => m.MedicineId, m => m);
+
+                var result = new List<object>();
+
+                foreach (var rx in rxList)
                 {
-                    InvoiceId = pendingInvoice.InvoiceId,
-                    ItemName = "Chi phi kham chuyen khoa & Dich vu y te",
-                    ItemType = "Consultation",
-                    Quantity = 1,
-                    UnitPrice = examFee,
-                    Amount = examFee,
-                    CreatedAt = DateTime.UtcNow,
-                    UpdatedAt = DateTime.UtcNow
-                });
-                if (medFee > 0)
-                {
-                    _context.InvoiceItems.Add(new InvoiceItem
+                    recordMap.TryGetValue(rx.MedicalRecordId, out var record);
+                    detailsGroup.TryGetValue(rx.PrescriptionId, out var details);
+                    if (details == null) details = new List<PrescriptionDetail>();
+
+                    patientMap.TryGetValue(rx.PatientId, out var pInfo);
+                    string pName = pInfo?.FullName ?? "Bệnh nhân";
+                    string pPhone = !string.IsNullOrEmpty(pInfo?.PhoneNumber) ? pInfo.PhoneNumber : (pInfo != null && userPhoneMap.ContainsKey(pInfo.UserId) ? userPhoneMap[pInfo.UserId] : "");
+                    string pCccd = pInfo?.CccdNumber ?? "";
+                    string pInsurance = pInfo?.HealthInsuranceNumber ?? "";
+                    int age = pInfo?.DateOfBirth.HasValue == true ? DateTime.Today.Year - pInfo.DateOfBirth.Value.Year : 30;
+                    string gender = pInfo?.Gender ?? "Nam";
+                    string dName = docMap.ContainsKey(rx.DoctorId) ? docMap[rx.DoctorId] : "BS. Nguyễn Văn A";
+                    string dDegree = docDegreeMap.ContainsKey(rx.DoctorId) ? docDegreeMap[rx.DoctorId] : "Bác sĩ";
+                    string summary = string.Join(", ", details.Select(d => $"{d.MedicineNameSnapshot} ({d.Quantity} {d.UnitSnapshot})"));
+                    string rxCode = $"RX-2026-{rx.PrescriptionId:D4}";
+
+                    string dispensedBy = "DS. Trịnh Mai Phương";
+                    if (!string.IsNullOrEmpty(rx.Note))
                     {
-                        InvoiceId = pendingInvoice.InvoiceId,
-                        ItemName = "Phi thuoc theo Don thuoc dien tu",
-                        ItemType = "Medicine",
-                        Quantity = dto.Prescriptions?.Count ?? 0,
-                        UnitPrice = medFee,
-                        Amount = medFee,
-                        CreatedAt = DateTime.UtcNow,
-                        UpdatedAt = DateTime.UtcNow
+                        var m = System.Text.RegularExpressions.Regex.Match(rx.Note, @"\[(?:Đã phát bởi\s+|Đã cấp phát bởi\s+|Dược sĩ ghi chú:\s+|Dược sĩ:\s+|Dược sĩ\s+)?([^\]:]+)\]");
+                        if (m.Success)
+                        {
+                            string raw = m.Groups[1].Value.Trim();
+                            if (!string.IsNullOrEmpty(raw) && raw != "Dược sĩ" && raw != "Dược sĩ ghi chú")
+                            {
+                                dispensedBy = raw.StartsWith("DS") || raw.StartsWith("Dược sĩ") ? raw : $"DS. {raw}";
+                            }
+                        }
+                    }
+
+                    var drugItems = details.Select(d =>
+                    {
+                        int stock = medDict.ContainsKey(d.MedicineId) ? medDict[d.MedicineId].StockQuantity : 100;
+                        return new
+                        {
+                            prescriptionDetailId = d.PrescriptionDetailId,
+                            medicineId = d.MedicineId,
+                            medicineName = d.MedicineNameSnapshot,
+                            unit = d.UnitSnapshot,
+                            quantity = d.Quantity,
+                            dosage = d.Dosage,
+                            frequency = d.Frequency,
+                            duration = d.Duration,
+                            usageInstruction = d.UsageInstruction,
+                            stockQuantity = stock,
+                            stockStatus = stock >= d.Quantity ? "Khả dụng" : "Hết hàng"
+                        };
+                    }).ToList();
+
+                    result.Add(new
+                    {
+                        prescriptionId = rx.PrescriptionId,
+                        prescriptionCode = rxCode,
+                        medicalRecordId = rx.MedicalRecordId,
+                        appointmentId = record?.AppointmentId ?? 0,
+                        patientId = rx.PatientId,
+                        patientName = pName,
+                        patientPhone = pPhone,
+                        patientCccd = pCccd,
+                        patientInsurance = pInsurance,
+                        patientAge = age,
+                        patientGender = gender,
+                        doctorName = dName,
+                        doctorDegree = dDegree,
+                        diagnosis = record?.Diagnosis ?? "",
+                        symptoms = record?.Symptoms ?? "",
+                        dispensedAt = rx.UpdatedAt,
+                        dispensedByName = dispensedBy,
+                        note = rx.Note ?? "",
+                        prescriptionNote = rx.Note ?? "",
+                        itemCount = details.Count,
+                        summary = summary,
+                        items = drugItems
                     });
                 }
-                if (clsFee > 0)
+
+                if (!string.IsNullOrWhiteSpace(search))
                 {
-                    _context.InvoiceItems.Add(new InvoiceItem
-                    {
-                        InvoiceId = pendingInvoice.InvoiceId,
-                        ItemName = "Phi Xet nghiem & Sieu am chi dinh",
-                        ItemType = "ClinicalService",
-                        Quantity = clsServiceIds.Count,
-                        UnitPrice = clsFee,
-                        Amount = clsFee,
-                        CreatedAt = DateTime.UtcNow,
-                        UpdatedAt = DateTime.UtcNow
-                    });
+                    string s = search.Trim().ToLower();
+                    result = result.Where(r => {
+                        dynamic item = r;
+                        string pn = ((string)item.patientName).ToLower();
+                        string ph = ((string)item.patientPhone).ToLower();
+                        string cd = ((string)item.patientCccd).ToLower();
+                        string ins = ((string)item.patientInsurance).ToLower();
+                        string dn = ((string)item.doctorName).ToLower();
+                        string diag = ((string)item.diagnosis).ToLower();
+                        string sym = ((string)item.symptoms).ToLower();
+                        string sm = ((string)item.summary).ToLower();
+                        string nt = ((string)item.note).ToLower();
+                        string disp = ((string)item.dispensedByName).ToLower();
+                        string apId = item.appointmentId.ToString();
+                        string rxId = item.prescriptionId.ToString();
+                        string code = ((string)item.prescriptionCode).ToLower();
+                        return pn.Contains(s) || ph.Contains(s) || cd.Contains(s) || ins.Contains(s) ||
+                               dn.Contains(s) || diag.Contains(s) || sym.Contains(s) || sm.Contains(s) ||
+                               nt.Contains(s) || disp.Contains(s) || apId.Contains(s) || rxId.Contains(s) || code.Contains(s);
+                    }).ToList();
                 }
+
+                return Ok(result);
+            }
+            catch (Exception ex)
+            {
+                var msg = ex.InnerException != null ? $"{ex.Message} --> {ex.InnerException.Message}" : ex.Message;
+                if (ex.InnerException?.InnerException != null) msg += $" --> {ex.InnerException.InnerException.Message}";
+                return StatusCode(500, new { message = msg });
+            }
+        }
+
+            // GET /api/MedicalRecords/fix-rx43-note
+    [HttpGet("fix-rx43-note")]
+    public async Task<IActionResult> FixRx43Note()
+    {
+        try
+        {
+            var rx = await _context.Prescriptions.FirstOrDefaultAsync(p => p.PrescriptionId == 43);
+            if (rx != null)
+            {
+                rx.Note = "Nghá»‰ ngÆ¡i | [Dược sĩ]: Ä‚n uá»‘ng Ä‘iá»u Ä‘á»™, uá»‘ng thuá»‘c Ä‘áº§y Ä‘á»§";
+                rx.UpdatedAt = DateTime.UtcNow;
                 await _context.SaveChangesAsync();
             }
-            // Neu da co invoice (vi du chay lai), khong cap nhat gi - giu nguyen trang thai
-
-
-            return Ok(new { success = true, medicalRecordId = record.MedicalRecordId, insufficientStock });
-
+            return Ok(new { success = true });
         }
         catch (Exception ex)
         {
             return StatusCode(500, new { message = ex.Message });
         }
     }
-}
 
-public class CreateMedicalRecordDto
-{
-    public int AppointmentId { get; set; }
-    public int PatientId { get; set; }
-    public int DoctorId { get; set; }
-    public string Pulse { get; set; } = string.Empty;
-    public string BloodPressure { get; set; } = string.Empty;
-    public string Temperature { get; set; } = string.Empty;
-    public string Weight { get; set; } = string.Empty;
-    public string Height { get; set; } = string.Empty;
-    public string Symptoms { get; set; } = string.Empty;
-    public string Diagnosis { get; set; } = string.Empty;
-    public string? IcdCode { get; set; }
-    public string? IcdDescription { get; set; }
-    public string TreatmentPlan { get; set; } = string.Empty;
-    public List<PrescribedDrugDto> Prescriptions { get; set; } = new();
-}
+    // POST /api/MedicalRecords/{appointmentId}/dispense
+        [HttpPost("{appointmentId}/dispense")]
+        public async Task<IActionResult> DispensePrescription(int appointmentId, [FromBody] DispenseDto dto)
+        {
+            try
+            {
+                var record = await _context.MedicalRecords.FirstOrDefaultAsync(r => r.AppointmentId == appointmentId);
+                if (record == null)
+                {
+                    return NotFound(new { success = false, message = "KhÃ´ng tÃ¬m tháº¥y há»“ sÆ¡ bá»‡nh Ã¡n cho ca khÃ¡m nÃ y." });
+                }
 
-public class PrescribedDrugDto
-{
-    public int MedicineId { get; set; }
-    public string MedicineName { get; set; } = string.Empty;
-    public string Unit { get; set; } = "Viên";
-    public int Quantity { get; set; } = 10;
-    public string Dosage { get; set; } = "500mg";
-    public string Frequency { get; set; } = "2 lần/ngày";
-    public string UsageInstruction { get; set; } = "Uống sau ăn 30 phút";
+                var rx = await _context.Prescriptions.FirstOrDefaultAsync(p => p.MedicalRecordId == record.MedicalRecordId);
+                if (rx == null)
+                {
+                    return NotFound(new { success = false, message = "KhÃ´ng tÃ¬m tháº¥y Ä‘Æ¡n thuá»‘c cho ca khÃ¡m nÃ y." });
+                }
+
+                // Cáº­p nháº­t tráº¡ng thÃ¡i Ä‘Æ¡n thuá»‘c
+                // [Old code]: rx.Status = "Dispensed";
+                // [New code - GÃ¡n Completed phÃ¹ há»£p vá»›i PostgreSQL prescriptions_status_check]:
+                rx.Status = "Completed";
+                string pName = !string.IsNullOrWhiteSpace(dto?.PharmacistName) 
+                    ? dto.PharmacistName.Trim() 
+                    : "DS. Trịnh Mai Phương";
+
+                if (!string.IsNullOrWhiteSpace(dto?.PharmacistNote))
+                {
+                    rx.Note = string.IsNullOrEmpty(rx.Note)
+                        ? $"[{pName}]: {dto.PharmacistNote.Trim()}"
+                        : $"{rx.Note} | [{pName}]: {dto.PharmacistNote.Trim()}";
+                }
+                else
+                {
+                    rx.Note = string.IsNullOrEmpty(rx.Note)
+                        ? $"[Đã phát bởi {pName}]"
+                        : $"{rx.Note} | [Đã phát bởi {pName}]";
+                }
+                rx.UpdatedAt = DateTime.UtcNow;
+
+                // Cập nhật cuộc hẹn sang StatusId = 4 (Completed)
+                var appt = await _context.Appointments.FirstOrDefaultAsync(a => a.AppointmentId == appointmentId);
+                if (appt != null)
+                {
+                    appt.StatusId = 4; // 4 = Completed
+                    appt.UpdatedAt = DateTime.UtcNow;
+                }
+
+                await _context.SaveChangesAsync();
+
+                return Ok(new
+                {
+                    success = true,
+                    message = "Xác nhận phát thuốc thành công!",
+                    prescriptionId = rx.PrescriptionId
+                });
+            }
+            catch (Exception ex)
+            {
+                var msg = ex.InnerException != null ? $"{ex.Message} --> {ex.InnerException.Message}" : ex.Message;
+                if (ex.InnerException?.InnerException != null) msg += $" --> {ex.InnerException.InnerException.Message}";
+                return StatusCode(500, new { success = false, message = msg });
+            }
+        }
+        // GET /api/MedicalRecords/icd10?specialtyId={specialtyId}&search={search}
+        [HttpGet("icd10")]
+        public async Task<IActionResult> GetIcd10Catalog([FromQuery] int? specialtyId, [FromQuery] string? search)
+        {
+            try
+            {
+                var query = _context.Icd10Catalogs.AsQueryable();
+
+                if (!string.IsNullOrWhiteSpace(search))
+                {
+                    string s = search.Trim().ToLower();
+                    query = query.Where(x => x.IcdCode.ToLower().Contains(s) || x.DiseaseName.ToLower().Contains(s));
+                }
+
+                var list = await query.ToListAsync();
+
+                if (list != null && list.Count > 0)
+                {
+                    var orderedList = list
+                        .OrderByDescending(x => specialtyId.HasValue && x.SpecialtyId == specialtyId.Value)
+                        .ThenByDescending(x => x.IsCommon)
+                        .ThenBy(x => x.IcdCode)
+                        .Select(x => new
+                        {
+                            icdCode = x.IcdCode,
+                            diseaseName = x.DiseaseName,
+                            chapterName = x.ChapterName,
+                            isCommon = x.IsCommon,
+                            specialtyId = x.SpecialtyId,
+                            isPreferred = specialtyId.HasValue && x.SpecialtyId == specialtyId.Value
+                        })
+                        .ToList();
+
+                    return Ok(new
+                    {
+                        success = true,
+                        total = orderedList.Count,
+                        items = orderedList
+                    });
+                }
+
+                // Danh sÃ¡ch dá»± phÃ²ng náº¿u báº£ng cÆ¡ sá»Ÿ dá»¯ liá»‡u chÆ°a náº¡p Ä‘á»§ mÃ£
+                var fallbacks = new List<dynamic>
+                {
+                    // Da liá»…u (SpecialtyId = 4 / Da liá»…u)
+                    new { icdCode = "L20", diseaseName = "ViÃªm da cÆ¡ Ä‘á»‹a (Atopic Dermatitis)", chapterName = "Bá»‡nh da vÃ  mÃ´ dÆ°á»›i da", isCommon = true, specialtyId = 4, isPreferred = specialtyId == 4 },
+                    new { icdCode = "L70", diseaseName = "Má»¥n trá»©ng cÃ¡ (Acne Vulgaris)", chapterName = "Bá»‡nh da vÃ  mÃ´ dÆ°á»›i da", isCommon = true, specialtyId = 4, isPreferred = specialtyId == 4 },
+                    new { icdCode = "L30", diseaseName = "ViÃªm da khÃ¡c (Eczema)", chapterName = "Bá»‡nh da vÃ  mÃ´ dÆ°á»›i da", isCommon = true, specialtyId = 4, isPreferred = specialtyId == 4 },
+                    new { icdCode = "L50", diseaseName = "MÃ y Ä‘ay (Urticaria)", chapterName = "Bá»‡nh da vÃ  mÃ´ dÆ°á»›i da", isCommon = true, specialtyId = 4, isPreferred = specialtyId == 4 },
+                    new { icdCode = "B35", diseaseName = "Bá»‡nh náº¥m da (Dermatophytosis)", chapterName = "Bá»‡nh nhiá»…m trÃ¹ng da", isCommon = true, specialtyId = 4, isPreferred = specialtyId == 4 },
+                    new { icdCode = "B02", diseaseName = "Bá»‡nh Zona (Herpes zoster)", chapterName = "Bá»‡nh nhiá»…m virus da", isCommon = true, specialtyId = 4, isPreferred = specialtyId == 4 },
+                    new { icdCode = "L40", diseaseName = "Bá»‡nh váº£y náº¿n (Psoriasis)", chapterName = "Bá»‡nh da vÃ  mÃ´ dÆ°á»›i da", isCommon = true, specialtyId = 4, isPreferred = specialtyId == 4 },
+                    new { icdCode = "L23", diseaseName = "ViÃªm da tiáº¿p xÃºc dá»‹ á»©ng", chapterName = "Bá»‡nh da vÃ  mÃ´ dÆ°á»›i da", isCommon = true, specialtyId = 4, isPreferred = specialtyId == 4 },
+                    new { icdCode = "L80", diseaseName = "Bá»‡nh báº¡ch biáº¿n (Vitiligo)", chapterName = "Bá»‡nh da vÃ  mÃ´ dÆ°á»›i da", isCommon = true, specialtyId = 4, isPreferred = specialtyId == 4 },
+
+                    // HÃ´ háº¥p / Tai mÅ©i há»ng (SpecialtyId = 1)
+                    new { icdCode = "J00", diseaseName = "ViÃªm mÅ©i há»ng cáº¥p tÃ­nh (Cáº£m láº¡nh)", chapterName = "Bá»‡nh há»‡ hÃ´ háº¥p", isCommon = true, specialtyId = 1, isPreferred = specialtyId == 1 },
+                    new { icdCode = "J02", diseaseName = "ViÃªm há»ng cáº¥p", chapterName = "Bá»‡nh há»‡ hÃ´ háº¥p", isCommon = true, specialtyId = 1, isPreferred = specialtyId == 1 },
+                    new { icdCode = "J03", diseaseName = "ViÃªm amiÄ‘an cáº¥p", chapterName = "Bá»‡nh há»‡ hÃ´ háº¥p", isCommon = true, specialtyId = 1, isPreferred = specialtyId == 1 },
+                    new { icdCode = "J20", diseaseName = "ViÃªm pháº¿ quáº£n cáº¥p", chapterName = "Bá»‡nh há»‡ hÃ´ háº¥p", isCommon = true, specialtyId = 1, isPreferred = specialtyId == 1 },
+                    new { icdCode = "J01", diseaseName = "ViÃªm xoang cáº¥p", chapterName = "Bá»‡nh há»‡ hÃ´ háº¥p", isCommon = true, specialtyId = 1, isPreferred = specialtyId == 1 },
+                    new { icdCode = "J45", diseaseName = "Hen pháº¿ quáº£n (Suyá»…n)", chapterName = "Bá»‡nh há»‡ hÃ´ háº¥p", isCommon = true, specialtyId = 1, isPreferred = specialtyId == 1 },
+
+                    // Tim máº¡ch / Ná»™i tá»•ng quÃ¡t (SpecialtyId = 2)
+                    new { icdCode = "I10", diseaseName = "TÄƒng huyáº¿t Ã¡p vÃ´ cÄƒn (nguyÃªn phÃ¡t)", chapterName = "Bá»‡nh há»‡ tuáº§n hoÃ n", isCommon = true, specialtyId = 2, isPreferred = specialtyId == 2 },
+                    new { icdCode = "E11", diseaseName = "ÄÃ¡i thÃ¡o Ä‘Æ°á»ng Type 2", chapterName = "Bá»‡nh ná»™i tiáº¿t, chuyá»ƒn hÃ³a", isCommon = true, specialtyId = 2, isPreferred = specialtyId == 2 },
+                    new { icdCode = "E78", diseaseName = "Rá»‘i loáº¡n chuyá»ƒn hÃ³a lipoprotein (Má»¡ mÃ¡u)", chapterName = "Bá»‡nh ná»™i tiáº¿t, chuyá»ƒn hÃ³a", isCommon = true, specialtyId = 2, isPreferred = specialtyId == 2 },
+                    
+                    // TiÃªu hÃ³a (SpecialtyId = 3)
+                    new { icdCode = "K21", diseaseName = "TrÃ o ngÆ°á»£c dáº¡ dÃ y - thá»±c quáº£n (GERD)", chapterName = "Bá»‡nh há»‡ tiÃªu hÃ³a", isCommon = true, specialtyId = 3, isPreferred = specialtyId == 3 },
+                    new { icdCode = "K29", diseaseName = "ViÃªm dáº¡ dÃ y vÃ  tÃ¡ trÃ ng", chapterName = "Bá»‡nh há»‡ tiÃªu hÃ³a", isCommon = true, specialtyId = 3, isPreferred = specialtyId == 3 },
+                    new { icdCode = "K58", diseaseName = "Há»™i chá»©ng ruá»™t kÃ­ch thÃ­ch (IBS)", chapterName = "Bá»‡nh há»‡ tiÃªu hÃ³a", isCommon = true, specialtyId = 3, isPreferred = specialtyId == 3 },
+
+                    // CÆ¡ xÆ°Æ¡ng khá»›p (SpecialtyId = 5)
+                    new { icdCode = "M54.5", diseaseName = "Äau lÆ°ng dÆ°á»›i (Tháº¯t lÆ°ng)", chapterName = "Bá»‡nh há»‡ cÆ¡ xÆ°Æ¡ng khá»›p", isCommon = true, specialtyId = 5, isPreferred = specialtyId == 5 },
+                    new { icdCode = "M17", diseaseName = "ThoÃ¡i hÃ³a khá»›p gá»‘i", chapterName = "Bá»‡nh há»‡ cÆ¡ xÆ°Æ¡ng khá»›p", isCommon = true, specialtyId = 5, isPreferred = specialtyId == 5 },
+                    new { icdCode = "M10", diseaseName = "Bá»‡nh GÃºt (Gout)", chapterName = "Bá»‡nh há»‡ cÆ¡ xÆ°Æ¡ng khá»›p", isCommon = true, specialtyId = 5, isPreferred = specialtyId == 5 },
+
+                    // Triá»‡u chá»©ng chung
+                    new { icdCode = "R50", diseaseName = "Sá»‘t khÃ´ng rÃµ nguyÃªn nhÃ¢n", chapterName = "Triá»‡u chá»©ng chung", isCommon = true, specialtyId = (int?)null, isPreferred = false },
+                    new { icdCode = "R51", diseaseName = "Äau Ä‘áº§u", chapterName = "Triá»‡u chá»©ng chung", isCommon = true, specialtyId = (int?)null, isPreferred = false },
+                    new { icdCode = "R10", diseaseName = "Äau bá»¥ng vÃ  vÃ¹ng cháº­u", chapterName = "Triá»‡u chá»©ng chung", isCommon = true, specialtyId = (int?)null, isPreferred = false }
+                };
+
+                if (!string.IsNullOrWhiteSpace(search))
+                {
+                    string s = search.Trim().ToLower();
+                    fallbacks = fallbacks.Where(x => ((string)x.icdCode).ToLower().Contains(s) || ((string)x.diseaseName).ToLower().Contains(s)).ToList();
+                }
+
+                var sortedFallbacks = fallbacks
+                    .OrderByDescending(x => specialtyId.HasValue && x.specialtyId == specialtyId.Value)
+                    .ThenByDescending(x => (bool)x.isCommon)
+                    .ThenBy(x => (string)x.icdCode)
+                    .ToList();
+
+                return Ok(new
+                {
+                    success = true,
+                    total = sortedFallbacks.Count,
+                    items = sortedFallbacks
+                });
+            }
+            catch (Exception ex)
+            {
+                return StatusCode(500, new { success = false, message = ex.Message });
+            }
+        }
+    }
+
+    public class CreateMedicalRecordDto
+    {
+        public int AppointmentId { get; set; }
+        public int PatientId { get; set; }
+        public int DoctorId { get; set; }
+        public string Pulse { get; set; } = string.Empty;
+        public string BloodPressure { get; set; } = string.Empty;
+        public string Temperature { get; set; } = string.Empty;
+        public string Weight { get; set; } = string.Empty;
+        public string Height { get; set; } = string.Empty;
+        public string Symptoms { get; set; } = string.Empty;
+        public string Diagnosis { get; set; } = string.Empty;
+        public string? IcdCode { get; set; }
+        public string? IcdDescription { get; set; }
+        public string TreatmentPlan { get; set; } = string.Empty;
+        public List<PrescribedDrugDto> Prescriptions { get; set; } = new();
+    }
+
+    public class PrescribedDrugDto
+    {
+        public int MedicineId { get; set; }
+        public string MedicineName { get; set; } = string.Empty;
+        public string Unit { get; set; } = "ViÃªn";
+        public int Quantity { get; set; } = 10;
+        public string Dosage { get; set; } = "500mg";
+        public string Frequency { get; set; } = "2 lần/ngày";
+        public string UsageInstruction { get; set; } = "Uá»‘ng sau Äƒn 30 phÃºt";
+    }
+
+    public class DispenseDto
+    {
+        public Guid? PharmacistUserId { get; set; }
+        public string? PharmacistName { get; set; }
+        public string? PharmacistNote { get; set; }
+    }
 }

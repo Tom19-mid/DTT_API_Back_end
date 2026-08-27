@@ -187,8 +187,8 @@ public class AuthController : ControllerBase
                 ?? (roleName + " " + (user.PhoneNumber.Length > 4 ? user.PhoneNumber.Substring(user.PhoneNumber.Length - 4) : "")),
             Degree = doctor?.Degree ?? roleName,
             ClinicRoom = doctor?.ClinicRoom ?? "Quầy làm việc",
-            SpecialtyId = doctor?.SpecialtyId ?? 1,
-            SpecialtyName = specialty?.SpecialtyName ?? "Nội tổng quát",
+            SpecialtyId = doctor?.SpecialtyId ?? (user.RoleId == 2 ? 1 : 0),
+            SpecialtyName = specialty?.SpecialtyName ?? (user.RoleId == 2 ? "Nội tổng quát" : string.Empty),
             Phone = user.PhoneNumber,
             Email = user.Email
         });

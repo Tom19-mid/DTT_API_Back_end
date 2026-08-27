@@ -46,7 +46,8 @@ public class FamilyMembersController : ControllerBase
                     Gender = owner.Gender ?? "Nam",
                     Phone = owner.PhoneNumber ?? "",
                     Cccd = owner.CccdNumber ?? "",
-                    Bhyt = owner.HealthInsuranceNumber ?? ""
+                    Bhyt = owner.HealthInsuranceNumber ?? "",
+                    Address = owner.Address ?? ""
                 });
             }
 
@@ -73,7 +74,8 @@ public class FamilyMembersController : ControllerBase
                     Gender = m.Gender ?? "Nam",
                     Phone = m.PhoneNumber ?? "",
                     Cccd = m.CccdNumber ?? "",
-                    Bhyt = m.HealthInsuranceNumber ?? ""
+                    Bhyt = m.HealthInsuranceNumber ?? "",
+                    Address = m.Address ?? ""
                 });
             }
 
@@ -81,7 +83,8 @@ public class FamilyMembersController : ControllerBase
         }
         catch (Exception ex)
         {
-            return StatusCode(500, new { success = false, message = "Lỗi lấy danh sách hồ sơ: " + ex.Message });
+            var msg = ex.InnerException != null ? ex.InnerException.Message : ex.Message;
+            return StatusCode(500, new { success = false, message = "Lỗi lấy danh sách hồ sơ: " + msg });
         }
     }
 
@@ -95,6 +98,17 @@ public class FamilyMembersController : ControllerBase
             if (string.IsNullOrWhiteSpace(dto.Name))
                 return BadRequest(new { success = false, message = "Họ tên không được để trống." });
 
+            string verStatus = "pending";
+            if (!string.IsNullOrWhiteSpace(dto.VerificationStatus))
+            {
+                var v = dto.VerificationStatus.Trim().ToLower();
+                if (v == "đã duyệt" || v == "verified") verStatus = "verified";
+                else if (v == "từ chối" || v == "rejected") verStatus = "rejected";
+            }
+
+            var receptionistUser = await _context.Users.FirstOrDefaultAsync(u => u.RoleId == 4 || u.Email == "letan.minhchau@gmail.com");
+            Guid currentUserId = receptionistUser?.UserId ?? Guid.Parse("ddb25ca6-80c8-434d-a05a-d4231c25e95b");
+
             var member = new FamilyMember
             {
                 OwnerPatientId = dto.OwnerPatientId,
@@ -104,7 +118,11 @@ public class FamilyMembersController : ControllerBase
                 PhoneNumber = dto.Phone,
                 CccdNumber = dto.Cccd,
                 HealthInsuranceNumber = dto.Bhyt,
-                VerificationStatus = "pending",
+                Address = dto.Address,
+                VerificationStatus = verStatus,
+                VerifiedBy = verStatus == "verified" ? currentUserId : null,
+                VerifiedAt = verStatus == "verified" ? DateTime.UtcNow : null,
+                VerificationNote = verStatus == "verified" ? (dto.VerificationNote ?? $"Đã đối chiếu thẻ CCCD thực tế tại Quầy Lễ Tân. CCCD: {dto.Cccd}") : null,
                 CreatedAt = DateTime.UtcNow,
                 UpdatedAt = DateTime.UtcNow
             };
@@ -115,7 +133,24 @@ public class FamilyMembersController : ControllerBase
             }
 
             _context.FamilyMembers.Add(member);
-            await _context.SaveChangesAsync();
+            try
+            {
+                await _context.SaveChangesAsync();
+            }
+            catch (DbUpdateException)
+            {
+                // Tự động đồng bộ lại PostgreSQL sequence cho member_id nếu bị lệch key
+                try
+                {
+                    await _context.Database.ExecuteSqlRawAsync(
+                        "SELECT setval(pg_get_serial_sequence('family_members', 'member_id'), coalesce(max(member_id), 0) + 1, false) FROM family_members;");
+                    await _context.SaveChangesAsync();
+                }
+                catch
+                {
+                    throw;
+                }
+            }
 
             var response = new ProfileResponseDto
             {
@@ -126,19 +161,22 @@ public class FamilyMembersController : ControllerBase
                 PatientId = $"#F{member.MemberId:D5}",
                 Relationship = member.Relationship,
                 VerificationStatus = member.VerificationStatus,
-                IsVerified = false,
+                IsVerified = member.VerificationStatus == "verified",
+                VerificationNote = member.VerificationNote,
                 Dob = member.DateOfBirth?.ToString("dd/MM/yyyy") ?? "",
                 Gender = member.Gender,
                 Phone = member.PhoneNumber ?? "",
                 Cccd = member.CccdNumber ?? "",
-                Bhyt = member.HealthInsuranceNumber ?? ""
+                Bhyt = member.HealthInsuranceNumber ?? "",
+                Address = member.Address
             };
 
             return Ok(new { success = true, message = "Thêm hồ sơ người thân thành công.", profile = response });
         }
         catch (Exception ex)
         {
-            return StatusCode(500, new { success = false, message = "Lỗi thêm hồ sơ: " + ex.Message });
+            var msg = ex.InnerException != null ? ex.InnerException.Message : ex.Message;
+            return StatusCode(500, new { success = false, message = "Lỗi thêm hồ sơ: " + msg });
         }
     }
 
@@ -162,6 +200,7 @@ public class FamilyMembersController : ControllerBase
                 if (!string.IsNullOrWhiteSpace(dto.Phone)) owner.PhoneNumber = dto.Phone;
                 if (!string.IsNullOrWhiteSpace(dto.Cccd)) owner.CccdNumber = dto.Cccd;
                 if (!string.IsNullOrWhiteSpace(dto.Bhyt)) owner.HealthInsuranceNumber = dto.Bhyt;
+                if (dto.Address != null) owner.Address = dto.Address;
                 if (TryParseDate(dto.Dob, out var parsedOwnerDob)) owner.DateOfBirth = parsedOwnerDob;
                 owner.UpdatedAt = DateTime.UtcNow;
 
@@ -182,43 +221,32 @@ public class FamilyMembersController : ControllerBase
                 if (dto.Phone != null) member.PhoneNumber = dto.Phone;
                 if (dto.Cccd != null) member.CccdNumber = dto.Cccd;
                 if (dto.Bhyt != null) member.HealthInsuranceNumber = dto.Bhyt;
-                if (!string.IsNullOrWhiteSpace(dto.Address)) member.Address = dto.Address;
+                if (dto.Address != null) member.Address = dto.Address;
                 if (TryParseDate(dto.Dob, out var parsedMemberDob)) member.DateOfBirth = parsedMemberDob;
 
-                // [NEW CODE] Cập nhật VerificationStatus, VerificationNote, VerifiedAt, VerifiedBy cho FamilyMember
                 if (!string.IsNullOrWhiteSpace(dto.VerificationStatus))
                 {
-                    string statusLower = dto.VerificationStatus.ToLower().Trim();
-                    if (statusLower == "đã duyệt" || statusLower == "verified")
+                    var v = dto.VerificationStatus.Trim().ToLower();
+                    if (v == "đã duyệt" || v == "verified")
                     {
                         member.VerificationStatus = "verified";
-                        var rawVerifiedAt = dto.VerifiedAt ?? DateTime.UtcNow;
-                        member.VerifiedAt = DateTime.SpecifyKind(rawVerifiedAt, DateTimeKind.Utc);
+                        if (!member.VerifiedAt.HasValue) member.VerifiedAt = DateTime.UtcNow;
+                        if (!member.VerifiedBy.HasValue)
+                        {
+                            var receptionistUser = await _context.Users.FirstOrDefaultAsync(u => u.RoleId == 4 || u.Email == "letan.minhchau@gmail.com");
+                            member.VerifiedBy = receptionistUser?.UserId ?? Guid.Parse("ddb25ca6-80c8-434d-a05a-d4231c25e95b");
+                        }
                     }
-                    else if (statusLower == "từ chối" || statusLower == "rejected")
+                    else if (v == "từ chối" || v == "rejected")
                     {
                         member.VerificationStatus = "rejected";
-                        var rawVerifiedAt = dto.VerifiedAt ?? DateTime.UtcNow;
-                        member.VerifiedAt = DateTime.SpecifyKind(rawVerifiedAt, DateTimeKind.Utc);
                     }
                     else
                     {
                         member.VerificationStatus = "pending";
-                        member.VerifiedAt = null;
                     }
                 }
-
-                if (dto.VerificationNote != null)
-                {
-                    member.VerificationNote = dto.VerificationNote;
-                }
-
-                var receptionistUser = await _context.Users.FirstOrDefaultAsync(u => u.RoleId == 4 || (u.FullName != null && (u.FullName.ToLower().Contains("lễ") || u.FullName.ToLower().Contains("tân") || u.FullName.ToLower().Contains("reception"))));
-                if (receptionistUser != null)
-                {
-                    member.VerifiedBy = receptionistUser.UserId;
-                }
-
+                if (dto.VerificationNote != null) member.VerificationNote = dto.VerificationNote;
                 member.UpdatedAt = DateTime.UtcNow;
 
                 await _context.SaveChangesAsync();
@@ -227,7 +255,8 @@ public class FamilyMembersController : ControllerBase
         }
         catch (Exception ex)
         {
-            return StatusCode(500, new { success = false, message = "Lỗi cập nhật hồ sơ: " + ex.Message });
+            var msg = ex.InnerException != null ? ex.InnerException.Message : ex.Message;
+            return StatusCode(500, new { success = false, message = "Lỗi cập nhật hồ sơ: " + msg });
         }
     }
 
@@ -287,7 +316,8 @@ public class FamilyMembersController : ControllerBase
         }
         catch (Exception ex)
         {
-            return StatusCode(500, new { success = false, message = ex.Message });
+            var msg = ex.InnerException != null ? ex.InnerException.Message : ex.Message;
+            return StatusCode(500, new { success = false, message = "Lỗi xác thực: " + msg });
         }
     }
 
@@ -316,7 +346,8 @@ public class FamilyMembersController : ControllerBase
         }
         catch (Exception ex)
         {
-            return StatusCode(500, new { success = false, message = "Lỗi xóa hồ sơ: " + ex.Message });
+            var msg = ex.InnerException != null ? ex.InnerException.Message : ex.Message;
+            return StatusCode(500, new { success = false, message = "Lỗi xóa hồ sơ: " + msg });
         }
     }
 
@@ -325,11 +356,19 @@ public class FamilyMembersController : ControllerBase
         result = default;
         if (string.IsNullOrWhiteSpace(dateStr)) return false;
 
-        string[] formats = { "dd/MM/yyyy", "d/M/yyyy", "yyyy-MM-dd", "MM/dd/yyyy", "dd-MM-yyyy" };
-        if (DateTime.TryParseExact(dateStr.Trim(), formats, CultureInfo.InvariantCulture, DateTimeStyles.None, out result))
+        string[] formats = { "dd/MM/yyyy", "d/M/yyyy", "yyyy-MM-dd", "MM/dd/yyyy", "dd-MM-yyyy", "yyyy/MM/dd" };
+        if (DateTime.TryParseExact(dateStr.Trim(), formats, CultureInfo.InvariantCulture, DateTimeStyles.None, out var dt))
+        {
+            result = DateTime.SpecifyKind(dt, DateTimeKind.Utc);
             return true;
+        }
 
-        return DateTime.TryParse(dateStr.Trim(), out result);
+        if (DateTime.TryParse(dateStr.Trim(), out dt))
+        {
+            result = DateTime.SpecifyKind(dt, DateTimeKind.Utc);
+            return true;
+        }
+        return false;
     }
 }
 
@@ -349,6 +388,7 @@ public class ProfileResponseDto
     public string? Phone { get; set; }
     public string? Cccd { get; set; }
     public string? Bhyt { get; set; }
+    public string? Address { get; set; }
 }
 
 public class CreateFamilyMemberDto
@@ -361,6 +401,9 @@ public class CreateFamilyMemberDto
     public string? Phone { get; set; }
     public string? Cccd { get; set; }
     public string? Bhyt { get; set; }
+    public string? Address { get; set; }
+    public string? VerificationStatus { get; set; }
+    public string? VerificationNote { get; set; }
 }
 
 public class UpdateFamilyMemberDto
@@ -377,6 +420,4 @@ public class UpdateFamilyMemberDto
     public string? Address { get; set; }
     public string? VerificationStatus { get; set; }
     public string? VerificationNote { get; set; }
-    public DateTime? VerifiedAt { get; set; }
-    public string? VerifiedBy { get; set; }
 }

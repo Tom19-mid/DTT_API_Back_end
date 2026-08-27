@@ -42,7 +42,8 @@ public class AppointmentsController : ControllerBase
                     new AppointmentStatus { StatusId = 5, StatusName = "Cancelled" },
                     new AppointmentStatus { StatusId = 6, StatusName = "NoShow" },
                     new AppointmentStatus { StatusId = 7, StatusName = "CheckedIn" },
-                    new AppointmentStatus { StatusId = 8, StatusName = "WaitingForDoctor" }
+                    new AppointmentStatus { StatusId = 8, StatusName = "WaitingForDoctor" },
+                    new AppointmentStatus { StatusId = 10, StatusName = "PendingDispensing" } // Chờ Dược sĩ phát thuốc
                 );
                 await _context.SaveChangesAsync();
             }
@@ -300,7 +301,7 @@ public class AppointmentsController : ControllerBase
                 // Bác sĩ chỉ thấy bệnh nhân đã qua Điều dưỡng đo sinh hiệu (status>=8) trở đi
                 // Workflow: CheckedIn(7)→[Điều dưỡng]→WaitingForDoctor(8)→[Bác sĩ]
                 query = query.Where(a => a.DoctorId == doctorId.Value &&
-                    (a.StatusId == 8 || a.StatusId == 3 || a.StatusId == 4 || a.StatusId == 5 || a.StatusId == 6));
+                    (a.StatusId == 8 || a.StatusId == 3 || a.StatusId == 4 || a.StatusId == 5 || a.StatusId == 6 || a.StatusId == 10));
             }
 
             if (todayOnly == true || date == "today")
@@ -804,6 +805,7 @@ public class AppointmentsController : ControllerBase
             if (appt.StatusId == 6) statusStr = "NoShow";
             else if (appt.StatusId == 5) statusStr = "Cancelled";
             else if (appt.StatusId == 4) statusStr = "Completed";
+            else if (appt.StatusId == 10) statusStr = "PendingDispensing"; // BS đã kê đơn → chờ Dược sĩ phát thuốc
             else if (appt.StatusId == 9) statusStr = "AwaitingTestResults"; // BS đã chỉ định CLS → đang ở phòng XN/SA
             else if (appt.StatusId == 3) statusStr = "InProgress";
             else if (appt.StatusId == 8) statusStr = "WaitingForDoctor"; // Điều dưỡng đã đo sinh hiệu → chờ BS khám

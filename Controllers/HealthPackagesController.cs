@@ -1,4 +1,4 @@
-using System.Data;
+﻿using System.Data;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using DTT_Backend_API.Data;
@@ -18,83 +18,83 @@ public class HealthPackagesController : ControllerBase
         _context = context;
     }
 
-    // GET /api/healthpackages — Lấy toàn bộ gói khám (kèm chi tiết dịch vụ)
+    // GET /api/healthpackages — Danh sách gói khám (lọc theo gender nếu có)
     [HttpGet]
-    public async Task<IActionResult> GetAll([FromQuery] string? gender = null)
+    public async Task<IActionResult> GetAllPackages([FromQuery] string? gender)
     {
         try
         {
-            var query = _context.HealthPackages
-                .Where(p => p.IsActive)
-                .Include(p => p.Details.OrderBy(d => d.SortOrder))
-                .AsQueryable();
+            var query = _context.HealthPackages.Include(p => p.Details).AsNoTracking().Where(p => p.IsActive);
 
-            // Filter by gender_target: 'male', 'female', or 'all' (all always show)
-            if (!string.IsNullOrEmpty(gender) && (gender == "male" || gender == "female"))
+            if (!string.IsNullOrEmpty(gender) && gender.ToLower() != "all")
             {
-                query = query.Where(p => p.GenderTarget == gender || p.GenderTarget == "all");
+                string g = gender.ToLower();
+                query = query.Where(p => p.GenderTarget == "all" || p.GenderTarget == g);
             }
 
-            var packages = await query
-                .OrderByDescending(p => p.BookedCount)
-                .Select(p => new HealthPackageResponseDto
-                {
-                    PackageId = p.PackageId,
-                    Title = p.Title,
-                    Description = p.Description,
-                    Price = p.Price,
-                    PriceFormatted = FormatPrice(p.Price),
-                    GenderTarget = p.GenderTarget,
-                    ImageUrl = p.ImageUrl,
-                    BookedCount = p.BookedCount,
-                    BookedCountFormatted = FormatBookedCount(p.BookedCount),
-                    IsActive = p.IsActive,
-                    Details = p.Details.Select(d => d.ServiceName).ToList()
-                })
-                .ToListAsync();
+            var list = await query.OrderBy(p => p.PackageId).ToListAsync();
 
-            return Ok(packages);
+            var result = list.Select(p => new HealthPackageResponseDto
+            {
+                PackageId = p.PackageId,
+                Title = p.Title,
+                Description = p.Description,
+                Price = p.Price,
+                PriceFormatted = FormatPrice(p.Price),
+                GenderTarget = p.GenderTarget,
+                ImageUrl = p.ImageUrl,
+                BookedCount = p.BookedCount,
+                BookedCountFormatted = FormatBookedCount(p.BookedCount),
+                IsActive = p.IsActive,
+                Details = p.Details != null
+                    ? p.Details.OrderBy(d => d.SortOrder).Select(d => d.ServiceName).ToList()
+                    : new List<string>()
+            }).ToList();
+
+            return Ok(result);
         }
         catch (Exception ex)
         {
             Console.WriteLine("Error getting health packages: " + ex.Message);
-            return StatusCode(500, new { message = "Lỗi tải danh sách gói khám: " + ex.Message });
+            return StatusCode(500, new { message = "Lỗi khi tải danh sách gói khám." });
         }
     }
 
-    // GET /api/healthpackages/{id} — Lấy chi tiết 1 gói khám
+    // GET /api/healthpackages/{id} — Chi tiết gói khám
     [HttpGet("{id}")]
-    public async Task<IActionResult> GetById(int id)
+    public async Task<IActionResult> GetPackageById(int id)
     {
         try
         {
-            var pkg = await _context.HealthPackages
-                .Where(p => p.PackageId == id && p.IsActive)
-                .Include(p => p.Details.OrderBy(d => d.SortOrder))
-                .Select(p => new HealthPackageResponseDto
-                {
-                    PackageId = p.PackageId,
-                    Title = p.Title,
-                    Description = p.Description,
-                    Price = p.Price,
-                    PriceFormatted = FormatPrice(p.Price),
-                    GenderTarget = p.GenderTarget,
-                    ImageUrl = p.ImageUrl,
-                    BookedCount = p.BookedCount,
-                    BookedCountFormatted = FormatBookedCount(p.BookedCount),
-                    IsActive = p.IsActive,
-                    Details = p.Details.Select(d => d.ServiceName).ToList()
-                })
-                .FirstOrDefaultAsync();
+            var pkg = await _context.HealthPackages.Include(p => p.Details).AsNoTracking()
+                .FirstOrDefaultAsync(p => p.PackageId == id && p.IsActive);
 
             if (pkg == null)
                 return NotFound(new { message = "Không tìm thấy gói khám." });
 
-            return Ok(pkg);
+            var dto = new HealthPackageResponseDto
+            {
+                PackageId = pkg.PackageId,
+                Title = pkg.Title,
+                Description = pkg.Description,
+                Price = pkg.Price,
+                PriceFormatted = FormatPrice(pkg.Price),
+                GenderTarget = pkg.GenderTarget,
+                ImageUrl = pkg.ImageUrl,
+                BookedCount = pkg.BookedCount,
+                BookedCountFormatted = FormatBookedCount(pkg.BookedCount),
+                IsActive = pkg.IsActive,
+                Details = pkg.Details != null
+                    ? pkg.Details.OrderBy(d => d.SortOrder).Select(d => d.ServiceName).ToList()
+                    : new List<string>()
+            };
+
+            return Ok(dto);
         }
         catch (Exception ex)
         {
-            return StatusCode(500, new { message = "Lỗi: " + ex.Message });
+            Console.WriteLine("Error getting package detail: " + ex.Message);
+            return StatusCode(500, new { message = "Lỗi khi tải chi tiết gói khám." });
         }
     }
 
@@ -138,14 +138,11 @@ public class HealthPackagesController : ControllerBase
             int validPatientId = patient.PatientId;
 
             // 3. Obtain target specialty & doctor matching the health package domain
-            // Trước đây chỉ nhận diện được 6/11 chuyên khoa — gói khám nào nhắc tới Chẩn đoán hình
-            // ảnh/Răng hàm mặt/Tai-Mũi-Họng/Mắt đều rơi về mặc định Nội tổng quát (id=1), khiến bệnh
-            // nhân bị xếp lịch sai chuyên khoa hoàn toàn so với tên gói khám.
             int targetSpecialtyId = 1;
             string titleLower = pkg.Title.ToLower();
             if (titleLower.Contains("tim mạch")) targetSpecialtyId = 5;
             else if (titleLower.Contains("xương khớp") || titleLower.Contains("cột sống")) targetSpecialtyId = 4;
-            else if (titleLower.Contains("sản") || titleLower.Contains("phụ khoa")) targetSpecialtyId = 3;
+            else if (titleLower.Contains("sản") || titleLower.Contains("phụ khoa") || titleLower.Contains("nữ") || titleLower.Contains("vú")) targetSpecialtyId = 3;
             else if (titleLower.Contains("nhi") || titleLower.Contains("trẻ em")) targetSpecialtyId = 2;
             else if (titleLower.Contains("thần kinh")) targetSpecialtyId = 6;
             else if (titleLower.Contains("da liễu")) targetSpecialtyId = 7;
@@ -165,51 +162,7 @@ public class HealthPackagesController : ControllerBase
                 return BadRequest(new { message = "Không tìm thấy bác sĩ phù hợp để xếp lịch." });
             int validDoctorId = matchedDoctor.DoctorId;
 
-            // 4. Safely get a valid, unbooked slot_id from doctor_schedule_slots table
-            int validSlotId = 0;
-            try
-            {
-                var conn = _context.Database.GetDbConnection();
-                if (conn.State != ConnectionState.Open) await conn.OpenAsync();
-
-                using var slotCmd = conn.CreateCommand();
-                slotCmd.CommandText = "SELECT s.slot_id FROM doctor_schedule_slots s JOIN doctor_schedules ds ON s.schedule_id = ds.schedule_id WHERE ds.doctor_id = " + validDoctorId + " AND s.status = 'Available' AND s.slot_id NOT IN (SELECT slot_id FROM appointments WHERE slot_id IS NOT NULL) LIMIT 1";
-                var val = await slotCmd.ExecuteScalarAsync();
-                if (val != null && val != DBNull.Value) validSlotId = Convert.ToInt32(val);
-                if (validSlotId == 0)
-                {
-                    using var anySlot = conn.CreateCommand();
-                    anySlot.CommandText = "SELECT slot_id FROM doctor_schedule_slots WHERE status = 'Available' AND slot_id NOT IN (SELECT slot_id FROM appointments WHERE slot_id IS NOT NULL) LIMIT 1";
-                    var val2 = await anySlot.ExecuteScalarAsync();
-                    if (val2 != null && val2 != DBNull.Value) validSlotId = Convert.ToInt32(val2);
-                }
-                if (validSlotId == 0)
-                {
-                    using var schedCmd = conn.CreateCommand();
-                    schedCmd.CommandText = $"INSERT INTO doctor_schedules (doctor_id, work_date, start_time, end_time) VALUES ({validDoctorId}, CURRENT_DATE, '08:00:00', '17:00:00') RETURNING schedule_id";
-                    var scRes = await schedCmd.ExecuteScalarAsync();
-                    int scId = scRes != null && scRes != DBNull.Value ? Convert.ToInt32(scRes) : 1;
-
-                    using var insSlot = conn.CreateCommand();
-                    insSlot.CommandText = $"INSERT INTO doctor_schedule_slots (schedule_id, slot_order, start_time, end_time, status) VALUES ({scId}, 1, '08:00:00', '09:00:00', 'Available') RETURNING slot_id";
-                    var slRes = await insSlot.ExecuteScalarAsync();
-                    if (slRes != null && slRes != DBNull.Value) validSlotId = Convert.ToInt32(slRes);
-                }
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine("Slot lookup warning in package booking: " + ex.Message);
-            }
-            if (validSlotId == 0) validSlotId = 1;
-
-            // 5. Create appointment record for package booking with EF Save & Raw SQL fallback
-            int queueNum = (await _context.Appointments.CountAsync(a => a.PatientId == validPatientId)) + 1;
-            int newAppointmentId = 0;
-
-            // Xác định ngày hẹn khám thực tế (mặc định ngày mai nếu không có PreferredDate) và LƯU vào
-            // cột appointment_date — trước đây chỉ nhúng vào chuỗi Reason (text tự do), khiến màn
-            // "Tiếp Đón & Check-in hôm nay" (lọc theo appointment_date) không nhận diện được, nên các
-            // ca đặt gói khám cho ngày mai vẫn bị hiện nhầm vào danh sách hôm nay (fallback theo created_at).
+            // 4. Determine preferred date & preferred time
             DateOnly apptDateForPackage;
             if (!string.IsNullOrEmpty(req.PreferredDate) &&
                 DateOnly.TryParseExact(req.PreferredDate, new[] { "d/M/yyyy", "dd/MM/yyyy", "yyyy-MM-dd", "M/d/yyyy" },
@@ -221,61 +174,113 @@ public class HealthPackagesController : ControllerBase
             {
                 apptDateForPackage = DateOnly.FromDateTime(DateTime.UtcNow.AddHours(7).AddDays(1)); // mặc định: ngày mai (giờ VN)
             }
-            string preferredDateStr = apptDateForPackage.ToString("dd/M/yyyy");
+            string preferredDateStr = apptDateForPackage.ToString("dd/MM/yyyy");
 
-            string bookingReason = $"{specName} - Gói: {pkg.Title} - {preferredDateStr}";
-            try
+            TimeSpan reqStart = new TimeSpan(8, 30, 0);
+            TimeSpan reqEnd = new TimeSpan(9, 30, 0);
+            if (!string.IsNullOrWhiteSpace(req.PreferredTimeSlot))
             {
-                var appointment = new Appointment
+                var parts = req.PreferredTimeSlot.Split('-');
+                if (parts.Length > 0 && TimeSpan.TryParse(parts[0].Trim(), out var parsedS))
                 {
-                    PatientId = validPatientId,
-                    DoctorId = validDoctorId,
-                    SlotId = validSlotId,
-                    Reason = bookingReason,
-                    Note = $"Gói khám: {pkg.Title} | {FormatPrice(pkg.Price)} | Bệnh nhân: {req.PatientName}",
-                    StatusId = 1, // Confirmed
-                    QueueNumber = queueNum,
-                    AppointmentDate = apptDateForPackage,
-                    CreatedAt = DateTime.UtcNow
-                };
-
-                _context.Appointments.Add(appointment);
-                await _context.SaveChangesAsync();
-                newAppointmentId = appointment.AppointmentId;
+                    reqStart = parsedS;
+                    reqEnd = reqStart.Add(TimeSpan.FromHours(1));
+                }
+                if (parts.Length > 1 && TimeSpan.TryParse(parts[1].Trim(), out var parsedE))
+                {
+                    reqEnd = parsedE;
+                }
             }
-            catch (Exception efEx)
+
+            // 5. Ensure doctor_schedules and doctor_schedule_slots for validDoctorId on apptDateForPackage
+            int validSlotId = 0;
+            var conn = _context.Database.GetDbConnection();
+            if (conn.State != ConnectionState.Open) await conn.OpenAsync();
+
+            DateTime workDateDb = apptDateForPackage.ToDateTime(TimeOnly.MinValue);
+
+            using (var schedCmd = conn.CreateCommand())
             {
-                Console.WriteLine("EF Save failed for package booking, executing raw SQL insert: " + efEx.Message);
-                var conn = _context.Database.GetDbConnection();
-                if (conn.State != ConnectionState.Open) await conn.OpenAsync();
+                schedCmd.CommandText = "SELECT schedule_id FROM doctor_schedules WHERE doctor_id = @dId AND work_date = @wDate LIMIT 1";
+                var pD = schedCmd.CreateParameter(); pD.ParameterName = "@dId"; pD.Value = validDoctorId; schedCmd.Parameters.Add(pD);
+                var pW = schedCmd.CreateParameter(); pW.ParameterName = "@wDate"; pW.Value = workDateDb; schedCmd.Parameters.Add(pW);
+                var scVal = await schedCmd.ExecuteScalarAsync();
+                int scId = (scVal != null && scVal != DBNull.Value) ? Convert.ToInt32(scVal) : 0;
 
-                using var rawCmd = conn.CreateCommand();
-                rawCmd.CommandText = @"
-                    INSERT INTO appointments (patient_id, doctor_id, slot_id, reason, status_id, queue_number, note, appointment_date, created_at)
-                    VALUES (@pId, @dId, @sId, @reason, 1, @qNum, @note, @apptDate, NOW())
-                    RETURNING appointment_id";
-                var p1 = rawCmd.CreateParameter(); p1.ParameterName = "@pId"; p1.Value = validPatientId; rawCmd.Parameters.Add(p1);
-                var p2 = rawCmd.CreateParameter(); p2.ParameterName = "@dId"; p2.Value = validDoctorId; rawCmd.Parameters.Add(p2);
-                var p3 = rawCmd.CreateParameter(); p3.ParameterName = "@sId"; p3.Value = validSlotId; rawCmd.Parameters.Add(p3);
-                var p4 = rawCmd.CreateParameter(); p4.ParameterName = "@reason"; p4.Value = bookingReason; rawCmd.Parameters.Add(p4);
-                var p5 = rawCmd.CreateParameter(); p5.ParameterName = "@qNum"; p5.Value = queueNum; rawCmd.Parameters.Add(p5);
-                var p6 = rawCmd.CreateParameter(); p6.ParameterName = "@note"; p6.Value = $"Gói khám: {pkg.Title} | {FormatPrice(pkg.Price)} | Bệnh nhân: {req.PatientName}"; rawCmd.Parameters.Add(p6);
-                var p7 = rawCmd.CreateParameter(); p7.ParameterName = "@apptDate"; p7.Value = apptDateForPackage; rawCmd.Parameters.Add(p7);
+                if (scId == 0)
+                {
+                    using var insSc = conn.CreateCommand();
+                    insSc.CommandText = "INSERT INTO doctor_schedules (doctor_id, work_date, start_time, end_time, created_at, updated_at) VALUES (@dId, @wDate, '07:30:00', '17:00:00', NOW(), NOW()) RETURNING schedule_id";
+                    var ipD = insSc.CreateParameter(); ipD.ParameterName = "@dId"; ipD.Value = validDoctorId; insSc.Parameters.Add(ipD);
+                    var ipW = insSc.CreateParameter(); ipW.ParameterName = "@wDate"; ipW.Value = workDateDb; insSc.Parameters.Add(ipW);
+                    var newSc = await insSc.ExecuteScalarAsync();
+                    if (newSc != null && newSc != DBNull.Value) scId = Convert.ToInt32(newSc);
+                }
 
-                var inserted = await rawCmd.ExecuteScalarAsync();
-                if (inserted != null && inserted != DBNull.Value) newAppointmentId = Convert.ToInt32(inserted);
+                if (scId > 0)
+                {
+                    using var slotCmd = conn.CreateCommand();
+                    slotCmd.CommandText = @"SELECT slot_id FROM doctor_schedule_slots 
+                                            WHERE schedule_id = @sId AND status = 'Available' 
+                                              AND slot_id NOT IN (SELECT slot_id FROM appointments WHERE slot_id IS NOT NULL) 
+                                            ORDER BY start_time ASC LIMIT 1";
+                    var pS = slotCmd.CreateParameter(); pS.ParameterName = "@sId"; pS.Value = scId; slotCmd.Parameters.Add(pS);
+                    var slVal = await slotCmd.ExecuteScalarAsync();
+                    if (slVal != null && slVal != DBNull.Value) validSlotId = Convert.ToInt32(slVal);
+
+                    if (validSlotId == 0)
+                    {
+                        using var insSlot = conn.CreateCommand();
+                        insSlot.CommandText = @"INSERT INTO doctor_schedule_slots (schedule_id, slot_order, start_time, end_time, status, created_at, updated_at) 
+                                                VALUES (@sId, (SELECT COALESCE(MAX(slot_order), 0) + 1 FROM doctor_schedule_slots WHERE schedule_id = @sId), @sTime, @eTime, 'Available', NOW(), NOW()) 
+                                                RETURNING slot_id";
+                        var ipS = insSlot.CreateParameter(); ipS.ParameterName = "@sId"; ipS.Value = scId; insSlot.Parameters.Add(ipS);
+                        var ipSt = insSlot.CreateParameter(); ipSt.ParameterName = "@sTime"; ipSt.Value = reqStart; insSlot.Parameters.Add(ipSt);
+                        var ipEt = insSlot.CreateParameter(); ipEt.ParameterName = "@eTime"; ipEt.Value = reqEnd; insSlot.Parameters.Add(ipEt);
+                        var newSl = await insSlot.ExecuteScalarAsync();
+                        if (newSl != null && newSl != DBNull.Value) validSlotId = Convert.ToInt32(newSl);
+                    }
+                }
             }
 
-            // Gửi thông báo xác nhận đặt gói khám lên App Mobile — trước đây thiếu, bệnh nhân chỉ thấy
-            // xác nhận tức thời trên màn hình lúc đặt, không có lịch sử nếu thoát app trước khi xem kỹ.
+            if (validSlotId == 0)
+                return BadRequest(new { success = false, message = "Không thể khởi tạo khung giờ khám cho gói dịch vụ." });
+
+            // 6. Create appointment record
+            int queueNum = (await _context.Appointments.CountAsync(a => a.PatientId == validPatientId)) + 1;
+            int newAppointmentId = 0;
+
+            string timeSlotSuffix = !string.IsNullOrWhiteSpace(req.PreferredTimeSlot) ? $" ({req.PreferredTimeSlot})" : "";
+            string bookingReason = $"{specName} - Gói: {pkg.Title} - {preferredDateStr}{timeSlotSuffix}";
+            string noteContent = $"Gói khám: {pkg.Title} | {FormatPrice(pkg.Price)} | Khung giờ: {req.PreferredTimeSlot ?? "08:00 - 17:00"} | Bệnh nhân: {req.PatientName}";
+
+            var appointment = new Appointment
+            {
+                PatientId = validPatientId,
+                DoctorId = validDoctorId,
+                SlotId = validSlotId,
+                Reason = bookingReason,
+                Note = noteContent,
+                StatusId = 1, // Confirmed
+                QueueNumber = queueNum,
+                AppointmentDate = apptDateForPackage,
+                CreatedAt = DateTime.UtcNow
+            };
+
+            _context.Appointments.Add(appointment);
+            await _context.SaveChangesAsync();
+            newAppointmentId = appointment.AppointmentId;
+
+            // 7. Push notification
             var pkgPatient = await _context.Patients.FirstOrDefaultAsync(p => p.PatientId == validPatientId);
             if (pkgPatient != null && pkgPatient.UserId != Guid.Empty)
             {
+                string timeNotice = !string.IsNullOrWhiteSpace(req.PreferredTimeSlot) ? $", khung giờ {req.PreferredTimeSlot}" : "";
                 _context.Notifications.Add(new Notification
                 {
                     UserId = pkgPatient.UserId,
                     Title = "✅ Đặt Gói Khám Sức Khỏe Thành Công",
-                    Content = $"Bạn đã đặt thành công gói khám '{pkg.Title}' (giá {FormatPrice(pkg.Price)}), dự kiến khám ngày {apptDateForPackage:dd/MM/yyyy}. Số thứ tự dự kiến: {queueNum}.\n\nVui lòng đến bệnh viện đúng ngày hẹn để làm thủ tục tiếp đón.",
+                    Content = $"Bạn đã đặt thành công gói khám '{pkg.Title}' (giá {FormatPrice(pkg.Price)}), dự kiến khám ngày {apptDateForPackage:dd/MM/yyyy}{timeNotice}. Số thứ tự dự kiến: {queueNum}.\n\nVui lòng đến bệnh viện đúng ngày hẹn để làm thủ tục tiếp đón.",
                     Type = "appointment",
                     RelatedId = newAppointmentId > 0 ? newAppointmentId : (int?)null,
                     RelatedType = "appointment",
@@ -318,7 +323,7 @@ public class HealthPackagesController : ControllerBase
     }
 }
 
-// ── DTOs ─────────────────────────────────────────────────────────────────────
+// ── DTOs ──────────────────────────────────────────────────────────────────────
 
 public class HealthPackageResponseDto
 {
@@ -340,5 +345,6 @@ public class BookPackageRequest
     public int PatientId { get; set; }
     public string PatientName { get; set; } = string.Empty;
     public string? PreferredDate { get; set; }
+    public string? PreferredTimeSlot { get; set; }
     public string? PriceFormatted { get; set; }
 }

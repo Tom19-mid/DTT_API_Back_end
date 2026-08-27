@@ -110,6 +110,7 @@ public class InvoicesController : ControllerBase
         // Chỉ Lễ Tân/nhân viên mới được xác nhận đã thu tiền — bệnh nhân không được tự đánh dấu
         // hóa đơn của mình là "đã thanh toán" mà không thực sự trả tiền tại quầy.
         if (!AccessControl.IsStaff(User)) return this.ForbidJson();
+        using var transaction = await _context.Database.BeginTransactionAsync();
         try
         {
             // 1. Tìm appointment và patient
@@ -143,6 +144,10 @@ public class InvoicesController : ControllerBase
             if (pendingInvoice != null)
             {
                 invoice = pendingInvoice;
+                // Đặt PaidAmount = 0 để tránh vi phạm chk_paid_le_total khi xóa và thêm lại các dòng items
+                invoice.PaidAmount = 0;
+                await _context.SaveChangesAsync();
+
                 // Xoa cac items cu cua pending invoice de cap nhat items moi trung khep 100%
                 var oldItems = await _context.InvoiceItems.Where(item => item.InvoiceId == invoice.InvoiceId).ToListAsync();
                 if (oldItems.Count > 0)
@@ -153,14 +158,19 @@ public class InvoicesController : ControllerBase
             }
             else
             {
-                // Tao Invoice moi (truong hop le tan thu tien truoc khi bac si hoan tat)
+                // Tao Invoice moi voi PaidAmount = 0 ban dau
+                // QUAN TRỌNG: Phải để PaidAmount = 0 khi tạo ban đầu vì DB có Trigger 'trg_recalc_invoice_total'
+                // tự động UPDATE 'total_amount = SUM(amount)' sau MỖI DÒNG insert vào invoice_items.
+                // Nếu gán PaidAmount = totalAmount ngay từ đầu, khi chèn dòng đầu tiên (chưa đủ tổng),
+                // Postgres sẽ báo lỗi Check Constraint 'chk_paid_le_total' (paid_amount <= total_amount)
+                // dẫn tới rollback và mất toàn bộ các dòng invoice_items.
                 invoice = new Invoice
                 {
                     AppointmentId = dto.AppointmentId,
                     PatientId = patient?.PatientId ?? appt.PatientId,
-                    TotalAmount = totalAmount,
-                    PaidAmount = totalAmount,
-                    PaymentStatus = "paid",
+                    TotalAmount = 0,
+                    PaidAmount = 0,
+                    PaymentStatus = "unpaid",
                     PaymentMethod = dto.PaymentMethod ?? "cash",
                     InvoiceDate = DateTime.UtcNow,
                     CreatedAt = DateTime.UtcNow,
@@ -191,7 +201,7 @@ public class InvoicesController : ControllerBase
             _context.InvoiceItems.AddRange(items);
             await _context.SaveChangesAsync();
 
-            // Cập nhật invoice pending → paid (đảm bảo TotalAmount = PaidAmount = sum of items)
+            // Cập nhật invoice pending → paid sau khi các items đã được lưu và trigger đã tính xong total_amount
             invoice.TotalAmount = totalAmount;
             invoice.PaidAmount = totalAmount;
             invoice.PaymentStatus = "paid";
@@ -222,9 +232,10 @@ public class InvoicesController : ControllerBase
                     IsRead = false,
                     CreatedAt = DateTime.UtcNow
                 });
+                await _context.SaveChangesAsync();
             }
 
-            await _context.SaveChangesAsync();
+            await transaction.CommitAsync();
 
             return Ok(new
             {
@@ -237,8 +248,8 @@ public class InvoicesController : ControllerBase
             });
         }
         catch (Exception ex)
-
         {
+            await transaction.RollbackAsync();
             return StatusCode(500, new { success = false, message = ex.Message });
         }
     }

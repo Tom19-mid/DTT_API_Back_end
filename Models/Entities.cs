@@ -941,6 +941,15 @@ public class Prescription
     [Column("updated_at")]
     public DateTime UpdatedAt { get; set; } = DateTime.UtcNow;
 
+    // ── Phân hệ Dược sĩ — ghi nhận ai phát thuốc và lúc nào ──────────────────
+    // Chạy migration ALTER TABLE prescriptions ADD COLUMN dispensed_by UUID; khi có quyền superuser
+    // Hiện tại dùng [NotMapped] + lưu vào note/status để đảm bảo an toàn CSDL
+    [NotMapped]
+    public Guid? DispensedBy { get; set; }
+
+    [NotMapped]
+    public DateTime? DispensedAt { get; set; }
+
     // Navigation
     public List<PrescriptionDetail> Details { get; set; } = new();
 }
