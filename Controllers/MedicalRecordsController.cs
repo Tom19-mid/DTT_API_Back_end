@@ -1024,7 +1024,12 @@ namespace DTT_Backend_API.Controllers
                 // Cáº­p nháº­t tráº¡ng thÃ¡i Ä‘Æ¡n thuá»‘c
                 // [Old code]: rx.Status = "Dispensed";
                 // [New code - GÃ¡n Completed phÃ¹ há»£p vá»›i PostgreSQL prescriptions_status_check]:
+                // [New code - Ghi nhận trực tiếp vào 2 cột dispensed_by, dispensed_at trong database]:
                 rx.Status = "Completed";
+                rx.DispensedBy = dto?.PharmacistUserId;
+                rx.DispensedAt = DateTime.UtcNow;
+                rx.UpdatedAt = DateTime.UtcNow;
+
                 string pName = !string.IsNullOrWhiteSpace(dto?.PharmacistName) 
                     ? dto.PharmacistName.Trim() 
                     : "DS. Trịnh Mai Phương";
