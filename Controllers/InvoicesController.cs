@@ -1,3 +1,4 @@
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using DTT_Backend_API.Data;
@@ -12,16 +13,55 @@ namespace DTT_Backend_API.Controllers;
 public class InvoicesController : ControllerBase
 {
     private readonly AppDbContext _context;
+    private readonly IConfiguration _config;
+    // [Old code - Dịch vụ VNPAY]:
+    // private readonly DTT_Backend_API.Services.IVnPayService _vnPayService;
+    private readonly DTT_Backend_API.Models.PaypalClient _paypalClient;
 
-    public InvoicesController(AppDbContext context)
+    public InvoicesController(AppDbContext context, IConfiguration config, DTT_Backend_API.Models.PaypalClient paypalClient)
     {
         _context = context;
+        _config = config;
+        // _vnPayService = vnPayService;
+        _paypalClient = paypalClient;
     }
 
     // GET /api/Invoices/estimate/{appointmentId}
     // Trả về phí khám + phí thuốc THẬT tính từ đơn thuốc điện tử (prescription_details x medicines.unit_price)
     // Dùng để hiển thị đúng số tiền trên màn Thanh Toán TRƯỚC khi Lễ Tân bấm xác nhận thu tiền.
+
+    [HttpGet("sync-invoice-items/{invoiceId}")]
+    [AllowAnonymous]
+    public async Task<IActionResult> SyncInvoiceItems(int invoiceId)
+    {
+        var invoice = await _context.Invoices.FirstOrDefaultAsync(i => i.InvoiceId == invoiceId);
+        if (invoice == null) return NotFound(new { success = false, message = "Invoice not found" });
+        var appt = await _context.Appointments.FirstOrDefaultAsync(a => a.AppointmentId == invoice.AppointmentId);
+        if (appt == null) return NotFound(new { success = false, message = "Appt not found" });
+
+        decimal examFee = (appt.Note?.Contains("Gói khám:") == true) ? (ExtractPriceFromNote(appt.Note) ?? 250000m) : 250000m;
+        decimal servicesFee = await ComputeClsFeeAsync(appt.AppointmentId);
+        decimal medsFee = await ComputeMedsFeeAsync(appt.AppointmentId);
+
+        var existing = await _context.InvoiceItems.Where(i => i.InvoiceId == invoiceId).ToListAsync();
+        if (existing.Count == 0)
+        {
+            var items = new List<InvoiceItem>();
+            string examItemName = (appt.Note?.Contains("Gói khám:") == true) ? "Trọn gói khám sức khỏe" : "Công khám lâm sàng chuyên khoa";
+            items.Add(new InvoiceItem { InvoiceId = invoiceId, ItemName = examItemName, ItemType = "exam", Quantity = 1, UnitPrice = examFee, Amount = examFee, CreatedAt = DateTime.UtcNow, UpdatedAt = DateTime.UtcNow });
+            if (servicesFee > 0)
+                items.Add(new InvoiceItem { InvoiceId = invoiceId, ItemName = "Phí dịch vụ Cận lâm sàng (CLS)", ItemType = "service", Quantity = 1, UnitPrice = servicesFee, Amount = servicesFee, CreatedAt = DateTime.UtcNow, UpdatedAt = DateTime.UtcNow });
+            if (medsFee > 0)
+                items.Add(new InvoiceItem { InvoiceId = invoiceId, ItemName = "Phí thuốc theo Đơn thuốc điện tử", ItemType = "medicine", Quantity = 1, UnitPrice = medsFee, Amount = medsFee, CreatedAt = DateTime.UtcNow, UpdatedAt = DateTime.UtcNow });
+            
+            _context.InvoiceItems.AddRange(items);
+            await _context.SaveChangesAsync();
+        }
+        return Ok(new { success = true, items = await _context.InvoiceItems.Where(i => i.InvoiceId == invoiceId).ToListAsync() });
+    }
+
     [HttpGet("estimate/{appointmentId}")]
+    [AllowAnonymous]
     public async Task<IActionResult> GetEstimate(int appointmentId)
     {
         if (!await AccessControl.CanAccessAppointmentAsync(User, _context, appointmentId)) return this.ForbidJson();
@@ -225,7 +265,7 @@ public class InvoicesController : ControllerBase
                 {
                     UserId = patient.UserId,
                     Title = "Hóa Đơn Viện Phí Đã Được Xác Nhận",
-                    Content = $"Hóa đơn khám chữa bệnh của bạn ({patient.FullName}) đã được xác nhận thanh toán thành công tại Quầy Thu Ngân DTT Healthcare.\n\nTỔNG TIỀN: {totalFormatted}\nHình thức: {(dto.PaymentMethod == "transfer" ? "Chuyển khoản" : "Tiền mặt tại quầy")}\n\nVui lòng vào mục Hồ Sơ Y Tế → Hóa Đơn để xem chi tiết.",
+                    Content = $"Hóa đơn khám chữa bệnh của bạn ({patient.FullName}) đã được xác nhận thanh toán thành công tại Quầy Thu Ngân DTT Healthcare.\n\nTỔNG TIỀN: {totalFormatted}\nHình thức: {(dto.PaymentMethod == "vnpay" ? "Cổng thanh toán VNPAY" : (dto.PaymentMethod == "bank_transfer" || dto.PaymentMethod == "transfer" ? "Chuyển khoản Ngân hàng (VietQR)" : "Tiền mặt tại quầy"))}\n\nVui lòng vào mục Hồ Sơ Y Tế → Hóa Đơn để xem chi tiết.",
                     Type = "result",
                     RelatedId = invoice.InvoiceId,
                     RelatedType = "invoice",
@@ -573,6 +613,791 @@ public class InvoicesController : ControllerBase
             return StatusCode(500, new { success = false, message = "Lỗi tạo hồ sơ vãng lai: " + ex.Message });
         }
     }
+
+
+    // ══════════════════════════════════════════════════════════════════════════
+    // PHÂN HỆ THANH TOÁN ĐA PHƯƠNG THỨC: VNPAY & VIETQR (NGÂN HÀNG)
+    // ══════════════════════════════════════════════════════════════════════════
+
+    // GET /api/Invoices/vietqr/{appointmentId}
+    // Lấy thông tin & URL mã VietQR (Napas 247) tự động kèm số tiền và cú pháp chuyển khoản
+    [HttpGet("vietqr/{appointmentId}")]
+    public async Task<IActionResult> GetVietQrInfo(int appointmentId)
+    {
+        try
+        {
+            var appt = await _context.Appointments.FirstOrDefaultAsync(a => a.AppointmentId == appointmentId);
+            if (appt == null) return NotFound(new { success = false, message = "Không tìm thấy ca khám." });
+
+            var patient = await _context.Patients.FirstOrDefaultAsync(p => p.PatientId == appt.PatientId);
+
+            bool isPackage = appt.Note?.Contains("Gói khám:") == true;
+            decimal examFee = isPackage ? (ExtractPriceFromNote(appt.Note) ?? 250000m) : 250000m;
+            decimal servicesFee = await ComputeClsFeeAsync(appointmentId);
+            decimal medsFee = await ComputeMedsFeeAsync(appointmentId);
+            decimal totalAmount = examFee + servicesFee + medsFee;
+
+            string bankId = _config["VietQR:BankId"] ?? "MB";
+            string bankName = _config["VietQR:BankName"] ?? "Ngân hàng Quân Đội (MB Bank)";
+            string accountNo = _config["VietQR:AccountNo"] ?? "0904444444";
+            string accountName = _config["VietQR:AccountName"] ?? "PHONG KHAM DA KHOA DTT HEALTHCARE";
+            string template = _config["VietQR:Template"] ?? "compact2";
+
+            string content = $"DTT CA{appointmentId}";
+            string qrUrl = $"https://img.vietqr.io/image/{bankId}-{accountNo}-{template}.jpg?amount={(long)totalAmount}&addInfo={Uri.EscapeDataString(content)}&accountName={Uri.EscapeDataString(accountName)}";
+
+            return Ok(new
+            {
+                success = true,
+                appointmentId,
+                patientName = patient?.FullName ?? "Bệnh nhân",
+                examFee,
+                servicesFee,
+                medsFee,
+                totalAmount,
+                bankId,
+                bankName,
+                accountNo,
+                accountName,
+                transferContent = content,
+                qrUrl
+            });
+        }
+        catch (Exception ex)
+        {
+            return StatusCode(500, new { success = false, message = "Lỗi tạo thông tin VietQR: " + ex.Message });
+        }
+    }
+
+
+    // ══════════════════════════════════════════════════════════════════════
+    // ── PHÂN HỆ THANH TOÁN QUỐC TẾ PAYPAL (REST API v2 & JAVASCRIPT SDK) ──
+    // ══════════════════════════════════════════════════════════════════════
+
+    // 1. GET /api/Invoices/paypal-info/{appointmentId}
+    // Lấy thông tin thanh toán PayPal, số tiền quy đổi USD và mã QR thanh toán bằng điện thoại
+    [HttpGet("paypal-info/{appointmentId}")]
+    [AllowAnonymous]
+    public async Task<IActionResult> GetPaypalInfo(int appointmentId)
+    {
+        try
+        {
+            var appt = await _context.Appointments.FirstOrDefaultAsync(a => a.AppointmentId == appointmentId);
+            if (appt == null) return NotFound(new { success = false, message = "Không tìm thấy ca khám." });
+
+            var patient = await _context.Patients.FirstOrDefaultAsync(p => p.PatientId == appt.PatientId);
+
+            bool isPackage = appt.Note?.Contains("Gói khám:") == true;
+            decimal examFee = isPackage ? (ExtractPriceFromNote(appt.Note) ?? 250000m) : 250000m;
+            decimal servicesFee = await ComputeClsFeeAsync(appointmentId);
+            decimal medsFee = await ComputeMedsFeeAsync(appointmentId);
+            decimal totalVnd = examFee + servicesFee + medsFee;
+
+            decimal rate = _config.GetValue<decimal>("PayPalOptions:ExchangeRateUsd", 25000m);
+            if (rate <= 0) rate = 25000m;
+            decimal totalUsd = Math.Round(totalVnd / rate, 2);
+            if (totalUsd <= 0) totalUsd = 1.00m;
+
+            // Link trang Checkout PayPal trên mobile (dùng IP mạng LAN để điện thoại quét mã QR truy cập được)
+            string host = Request.Host.Value;
+            string scheme = Request.Scheme;
+
+            if (host.StartsWith("localhost", StringComparison.OrdinalIgnoreCase) || host.StartsWith("127.0.0.1"))
+            {
+                string? localIp = GetLocalIpAddress();
+                if (!string.IsNullOrEmpty(localIp))
+                {
+                    int port = Request.Host.Port ?? 5000;
+                    host = $"{localIp}:{port}";
+                }
+            }
+            string checkoutUrl = $"{scheme}://{host}/api/Invoices/paypal-checkout/{appointmentId}";
+
+            // Sinh mã QR để bệnh nhân quét bằng điện thoại
+            string qrUrl = $"https://api.qrserver.com/v1/create-qr-code/?size=300x300&data={Uri.EscapeDataString(checkoutUrl)}";
+
+            return Ok(new
+            {
+                success = true,
+                appointmentId,
+                patientName = patient?.FullName ?? "Bệnh nhân",
+                examFee,
+                servicesFee,
+                medsFee,
+                totalVnd,
+                totalUsd,
+                checkoutUrl,
+                qrUrl
+            });
+        }
+        catch (Exception ex)
+        {
+            return StatusCode(500, new { success = false, message = "Lỗi lấy thông tin PayPal: " + ex.Message });
+        }
+    }
+
+    // 2. POST /api/Invoices/create-paypal-order
+    // Tạo đơn hàng thanh toán trên cổng PayPal REST API v2
+    [HttpPost("create-paypal-order")]
+    [HttpPost("/payment/create-paypal-order")]
+    [AllowAnonymous]
+    public async Task<IActionResult> CreatePaypalOrder([FromBody] PaypalCreateOrderDto req)
+    {
+        try
+        {
+            var appt = await _context.Appointments.FirstOrDefaultAsync(a => a.AppointmentId == req.AppointmentId);
+            if (appt == null) return NotFound(new { success = false, message = "Không tìm thấy ca khám." });
+
+            bool isPackage = appt.Note?.Contains("Gói khám:") == true;
+            decimal examFee = isPackage ? (ExtractPriceFromNote(appt.Note) ?? 250000m) : 250000m;
+            decimal servicesFee = await ComputeClsFeeAsync(req.AppointmentId);
+            decimal medsFee = await ComputeMedsFeeAsync(req.AppointmentId);
+            decimal totalVnd = examFee + servicesFee + medsFee;
+
+            decimal rate = _config.GetValue<decimal>("PayPalOptions:ExchangeRateUsd", 25000m);
+            if (rate <= 0) rate = 25000m;
+            decimal totalUsd = Math.Round(totalVnd / rate, 2);
+            if (totalUsd <= 0) totalUsd = 1.00m;
+
+            string value = totalUsd.ToString("F2", System.Globalization.CultureInfo.InvariantCulture);
+            string currency = "USD";
+            string refId = $"DTT_APPT_{req.AppointmentId}_{DateTime.UtcNow.Ticks}";
+
+            var response = await _paypalClient.CreateOrder(value, currency, refId);
+            if (response == null || string.IsNullOrEmpty(response.id))
+            {
+                return BadRequest(new { success = false, message = "Không thể tạo đơn hàng PayPal." });
+            }
+
+            return Ok(new
+            {
+                success = true,
+                id = response.id,
+                status = response.status,
+                totalUsd,
+                totalVnd
+            });
+        }
+        catch (Exception ex)
+        {
+            return BadRequest(new { success = false, message = ex.GetBaseException().Message });
+        }
+    }
+
+    // 3. POST /api/Invoices/capture-paypal-order
+    // Bắt giữ giao dịch (Capture) sau khi bệnh nhân xác nhận trên PayPal JS SDK và cập nhật CSDL
+    [HttpPost("capture-paypal-order")]
+    [HttpPost("/payment/capture-paypal-order")]
+    [AllowAnonymous]
+    public async Task<IActionResult> CapturePaypalOrder([FromQuery] string orderId, [FromQuery] int appointmentId)
+    {
+        try
+        {
+            if (string.IsNullOrEmpty(orderId)) return BadRequest(new { success = false, message = "Thiếu orderId PayPal." });
+
+            var response = await _paypalClient.CaptureOrder(orderId);
+            if (response == null || response.status != "COMPLETED")
+            {
+                return BadRequest(new { success = false, message = "Giao dịch PayPal chưa hoàn tất hoặc bị hủy.", status = response?.status });
+            }
+
+            // Ghi nhận hóa đơn trong CSDL
+            var appt = await _context.Appointments.FirstOrDefaultAsync(a => a.AppointmentId == appointmentId);
+            var patient = appt != null ? await _context.Patients.FirstOrDefaultAsync(p => p.PatientId == appt.PatientId) : null;
+
+            decimal examFee = (appt?.Note?.Contains("Gói khám:") == true) ? (ExtractPriceFromNote(appt.Note) ?? 250000m) : 250000m;
+            decimal servicesFee = await ComputeClsFeeAsync(appointmentId);
+            decimal medsFee = await ComputeMedsFeeAsync(appointmentId);
+            decimal totalAmount = examFee + servicesFee + medsFee;
+
+            var invoice = await _context.Invoices.FirstOrDefaultAsync(i => i.AppointmentId == appointmentId);
+            if (invoice != null)
+            {
+                var oldItems = await _context.InvoiceItems.Where(item => item.InvoiceId == invoice.InvoiceId).ToListAsync();
+                if (oldItems.Count > 0)
+                {
+                    _context.InvoiceItems.RemoveRange(oldItems);
+                    await _context.SaveChangesAsync();
+                }
+            }
+            else
+            {
+                invoice = new Invoice
+                {
+                    AppointmentId = appointmentId,
+                    PatientId = patient?.PatientId ?? (appt?.PatientId ?? 0),
+                    TotalAmount = 0,
+                    PaidAmount = 0,
+                    PaymentStatus = "unpaid",
+                    PaymentMethod = "paypal",
+                    InvoiceDate = DateTime.UtcNow,
+                    CreatedAt = DateTime.UtcNow,
+                    UpdatedAt = DateTime.UtcNow
+                };
+                _context.Invoices.Add(invoice);
+                await _context.SaveChangesAsync();
+            }
+
+            // Tạo các InvoiceItems chi tiết cho hóa đơn PayPal
+            var items = new List<InvoiceItem>();
+            string examItemName = (appt?.Note?.Contains("Gói khám:") == true) ? "Trọn gói khám sức khỏe" : "Công khám lâm sàng chuyên khoa";
+            items.Add(new InvoiceItem
+            {
+                InvoiceId = invoice.InvoiceId,
+                ItemName = examItemName,
+                ItemType = "exam",
+                Quantity = 1,
+                UnitPrice = examFee,
+                Amount = examFee,
+                CreatedAt = DateTime.UtcNow,
+                UpdatedAt = DateTime.UtcNow
+            });
+            if (servicesFee > 0)
+            {
+                items.Add(new InvoiceItem
+                {
+                    InvoiceId = invoice.InvoiceId,
+                    ItemName = "Phí dịch vụ Cận lâm sàng (CLS)",
+                    ItemType = "service",
+                    Quantity = 1,
+                    UnitPrice = servicesFee,
+                    Amount = servicesFee,
+                    CreatedAt = DateTime.UtcNow,
+                    UpdatedAt = DateTime.UtcNow
+                });
+            }
+            if (medsFee > 0)
+            {
+                items.Add(new InvoiceItem
+                {
+                    InvoiceId = invoice.InvoiceId,
+                    ItemName = "Phí thuốc theo Đơn thuốc điện tử",
+                    ItemType = "medicine",
+                    Quantity = 1,
+                    UnitPrice = medsFee,
+                    Amount = medsFee,
+                    CreatedAt = DateTime.UtcNow,
+                    UpdatedAt = DateTime.UtcNow
+                });
+            }
+
+            _context.InvoiceItems.AddRange(items);
+            await _context.SaveChangesAsync();
+
+            invoice.TotalAmount = totalAmount;
+            invoice.PaidAmount = totalAmount;
+            invoice.PaymentStatus = "paid";
+            invoice.PaymentMethod = "paypal";
+            invoice.UpdatedAt = DateTime.UtcNow;
+            await _context.SaveChangesAsync();
+
+            // Gửi thông báo tới App Mobile của bệnh nhân
+            if (patient != null && patient.UserId != Guid.Empty)
+            {
+                _context.Notifications.Add(new Notification
+                {
+                    UserId = patient.UserId,
+                    Title = "Thanh Toán PayPal Thành Công",
+                    Content = $"Hóa đơn viện phí của bạn ({patient.FullName}) đã được thanh toán thành công qua Cổng PayPal.\n\nMÃ GIAO DỊCH: {orderId}\nSỐ TIỀN: {totalAmount:N0} VNĐ\n\nCảm ơn bạn đã sử dụng dịch vụ tại DTT Healthcare!",
+                    Type = "result",
+                    RelatedId = invoice.InvoiceId,
+                    RelatedType = "invoice",
+                    IsRead = false,
+                    CreatedAt = DateTime.UtcNow
+                });
+                await _context.SaveChangesAsync();
+            }
+
+            return Ok(new
+            {
+                success = true,
+                invoiceId = invoice.InvoiceId,
+                orderId,
+                status = response.status,
+                message = "Thanh toán PayPal thành công!"
+            });
+        }
+        catch (Exception ex)
+        {
+            return BadRequest(new { success = false, message = ex.GetBaseException().Message });
+        }
+    }
+
+    // 4. GET /api/Invoices/paypal-checkout/{appointmentId}
+    // Trang Web Mobile Checkout nhúng trực tiếp thư viện PayPal JavaScript SDK chính hãng
+    [HttpGet("paypal-checkout/{appointmentId}")]
+    [AllowAnonymous]
+    public async Task<IActionResult> PaypalCheckoutPage(int appointmentId)
+    {
+        var appt = await _context.Appointments.FirstOrDefaultAsync(a => a.AppointmentId == appointmentId);
+        var patient = appt != null ? await _context.Patients.FirstOrDefaultAsync(p => p.PatientId == appt.PatientId) : null;
+
+        var existingInvoice = await _context.Invoices.FirstOrDefaultAsync(i => i.AppointmentId == appointmentId);
+        bool isAlreadyPaid = existingInvoice != null && existingInvoice.PaymentStatus == "paid";
+
+        decimal examFee = (appt?.Note?.Contains("Gói khám:") == true) ? (ExtractPriceFromNote(appt.Note) ?? 250000m) : 250000m;
+        decimal servicesFee = await ComputeClsFeeAsync(appointmentId);
+        decimal medsFee = await ComputeMedsFeeAsync(appointmentId);
+        decimal totalVnd = examFee + servicesFee + medsFee;
+
+        decimal rate = _config.GetValue<decimal>("PayPalOptions:ExchangeRateUsd", 25000m);
+        if (rate <= 0) rate = 25000m;
+        decimal totalUsd = Math.Round(totalVnd / rate, 2);
+        if (totalUsd <= 0) totalUsd = 1.00m;
+
+        string clientId = _config["PayPalOptions:ClientId"] ?? "BAABlKpDuJPnlCxgjeRE69mwXMYujrDCq4ZZ95SxP9KeEwBrp-I-dcRrczBowbuwo-XTxQ0341Wyud_eks";
+        if (string.IsNullOrWhiteSpace(clientId)) clientId = "BAABlKpDuJPnlCxgjeRE69mwXMYujrDCq4ZZ95SxP9KeEwBrp-I-dcRrczBowbuwo-XTxQ0341Wyud_eks";
+
+        string pName = patient?.FullName ?? "Bệnh nhân";
+        string usdFormatted = totalUsd.ToString("F2", System.Globalization.CultureInfo.InvariantCulture);
+
+        var sb = new System.Text.StringBuilder();
+        sb.AppendLine("<!DOCTYPE html>");
+        sb.AppendLine("<html lang=\"vi\">");
+        sb.AppendLine("<head>");
+        sb.AppendLine("    <meta charset=\"UTF-8\">");
+        sb.AppendLine("    <meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">");
+        sb.AppendLine("    <title>Thanh Toán Viện Phí PayPal - DTT Healthcare</title>");
+        if (!isAlreadyPaid)
+        {
+            sb.AppendLine("    <!-- Nhúng thư viện PayPal JavaScript SDK chính hãng -->");
+            sb.AppendLine("    <script src=\"https://www.paypal.com/sdk/js?client-id=" + clientId + "&currency=USD\"></script>");
+        }
+        sb.AppendLine("    <style>");
+        sb.AppendLine("        * { box-sizing: border-box; margin: 0; padding: 0; }");
+        sb.AppendLine("        body {");
+        sb.AppendLine("            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;");
+        sb.AppendLine("            background: #f1f5f9;");
+        sb.AppendLine("            color: #1e293b;");
+        sb.AppendLine("            min-height: 100vh;");
+        sb.AppendLine("            display: flex;");
+        sb.AppendLine("            align-items: center;");
+        sb.AppendLine("            justify-content: center;");
+        sb.AppendLine("            padding: 16px;");
+        sb.AppendLine("        }");
+        sb.AppendLine("        .checkout-card {");
+        sb.AppendLine("            background: #ffffff;");
+        sb.AppendLine("            border-radius: 20px;");
+        sb.AppendLine("            box-shadow: 0 20px 35px -10px rgba(0,0,0,0.1), 0 1px 3px rgba(0,0,0,0.05);");
+        sb.AppendLine("            max-width: 460px;");
+        sb.AppendLine("            width: 100%;");
+        sb.AppendLine("            overflow: hidden;");
+        sb.AppendLine("        }");
+        sb.AppendLine("        .header {");
+        sb.AppendLine("            background: linear-gradient(135deg, #003087 0%, #0070ba 100%);");
+        sb.AppendLine("            color: white;");
+        sb.AppendLine("            padding: 24px;");
+        sb.AppendLine("            text-align: center;");
+        sb.AppendLine("        }");
+        sb.AppendLine("        .header h1 { font-size: 20px; font-weight: 700; margin-bottom: 4px; }");
+        sb.AppendLine("        .header p { font-size: 13px; opacity: 0.9; }");
+        sb.AppendLine("        .body { padding: 24px; }");
+        sb.AppendLine("        .bill-info {");
+        sb.AppendLine("            background: #f8fafc;");
+        sb.AppendLine("            border: 1px solid #e2e8f0;");
+        sb.AppendLine("            border-radius: 12px;");
+        sb.AppendLine("            padding: 16px;");
+        sb.AppendLine("            margin-bottom: 20px;");
+        sb.AppendLine("        }");
+        sb.AppendLine("        .bill-row {");
+        sb.AppendLine("            display: flex;");
+        sb.AppendLine("            justify-content: space-between;");
+        sb.AppendLine("            margin-bottom: 8px;");
+        sb.AppendLine("            font-size: 14px;");
+        sb.AppendLine("        }");
+        sb.AppendLine("        .bill-row.total {");
+        sb.AppendLine("            border-top: 1px dashed #cbd5e1;");
+        sb.AppendLine("            padding-top: 10px;");
+        sb.AppendLine("            margin-top: 10px;");
+        sb.AppendLine("            font-weight: bold;");
+        sb.AppendLine("            font-size: 16px;");
+        sb.AppendLine("        }");
+        sb.AppendLine("        .total-vnd { color: #059669; font-size: 20px; font-weight: 800; }");
+        sb.AppendLine("        .total-usd { color: #0070ba; font-size: 14px; font-weight: 600; }");
+        sb.AppendLine("        #paypal-button-container { margin-top: 16px; min-height: 120px; }");
+        sb.AppendLine("        .success-box {");
+        sb.AppendLine("            display: " + (isAlreadyPaid ? "block" : "none") + ";");
+        sb.AppendLine("            text-align: center;");
+        sb.AppendLine("            padding: 24px;");
+        sb.AppendLine("        }");
+        sb.AppendLine("        .success-icon { font-size: 54px; margin-bottom: 12px; }");
+        sb.AppendLine("        .success-title { color: #16a34a; font-size: 22px; font-weight: bold; margin-bottom: 8px; }");
+        sb.AppendLine("        .success-msg { color: #64748b; font-size: 14px; line-height: 1.5; }");
+        sb.AppendLine("        .loading {");
+        sb.AppendLine("            display: none;");
+        sb.AppendLine("            text-align: center;");
+        sb.AppendLine("            padding: 16px;");
+        sb.AppendLine("            color: #0070ba;");
+        sb.AppendLine("            font-weight: 600;");
+        sb.AppendLine("            background: #eff6ff;");
+        sb.AppendLine("            border-radius: 8px;");
+        sb.AppendLine("            margin-top: 12px;");
+        sb.AppendLine("        }");
+        sb.AppendLine("    </style>");
+        sb.AppendLine("</head>");
+        sb.AppendLine("<body>");
+        sb.AppendLine("    <div class=\"checkout-card\">");
+        sb.AppendLine("        <div class=\"header\">");
+        sb.AppendLine("            <h1>🅿️ CỔNG THANH TOÁN PAYPAL</h1>");
+        sb.AppendLine("            <p>Phòng khám Đa khoa DTT Healthcare</p>");
+        sb.AppendLine("        </div>");
+        if (isAlreadyPaid)
+        {
+            sb.AppendLine("        <div class=\"success-box\">");
+            sb.AppendLine("            <div class=\"success-icon\">✅</div>");
+            sb.AppendLine("            <div class=\"success-title\">HÓA ĐƠN ĐÃ ĐƯỢC THANH TOÁN!</div>");
+            sb.AppendLine("            <p class=\"success-msg\">");
+            sb.AppendLine("                Ca khám <strong>#" + appointmentId + "</strong> của bệnh nhân <strong>" + pName + "</strong> đã hoàn tất thanh toán.<br><br>");
+            sb.AppendLine("                Mã hóa đơn: <strong>#HD-" + (existingInvoice?.InvoiceId ?? 0) + "</strong><br>");
+            sb.AppendLine("                Tổng viện phí: <strong style=\"color:#059669; font-size:16px;\">" + totalVnd.ToString("N0") + " VNĐ</strong><br><br>");
+            sb.AppendLine("                Bạn có thể đóng trang này.");
+            sb.AppendLine("            </p>");
+            sb.AppendLine("        </div>");
+        }
+        else
+        {
+            sb.AppendLine("        <div class=\"body\" id=\"checkout-content\">");
+            sb.AppendLine("            <div class=\"bill-info\">");
+            sb.AppendLine("                <div class=\"bill-row\">");
+            sb.AppendLine("                    <span style=\"color:#64748b;\">Bệnh nhân:</span>");
+            sb.AppendLine("                    <strong>" + pName + "</strong>");
+            sb.AppendLine("                </div>");
+            sb.AppendLine("                <div class=\"bill-row\">");
+            sb.AppendLine("                    <span style=\"color:#64748b;\">Mã ca khám:</span>");
+            sb.AppendLine("                    <strong>#" + appointmentId + "</strong>");
+            sb.AppendLine("                </div>");
+            sb.AppendLine("                <div class=\"bill-row\">");
+            sb.AppendLine("                    <span style=\"color:#64748b;\">Công khám:</span>");
+            sb.AppendLine("                    <span>" + examFee.ToString("N0") + " đ</span>");
+            sb.AppendLine("                </div>");
+            sb.AppendLine("                <div class=\"bill-row\">");
+            sb.AppendLine("                    <span style=\"color:#64748b;\">Dịch vụ CLS:</span>");
+            sb.AppendLine("                    <span>" + servicesFee.ToString("N0") + " đ</span>");
+            sb.AppendLine("                </div>");
+            sb.AppendLine("                <div class=\"bill-row\">");
+            sb.AppendLine("                    <span style=\"color:#64748b;\">Tiền thuốc:</span>");
+            sb.AppendLine("                    <span>" + medsFee.ToString("N0") + " đ</span>");
+            sb.AppendLine("                </div>");
+            sb.AppendLine("                <div class=\"bill-row total\">");
+            sb.AppendLine("                    <span>Tổng viện phí:</span>");
+            sb.AppendLine("                    <div style=\"text-align:right;\">");
+            sb.AppendLine("                        <div class=\"total-vnd\">" + totalVnd.ToString("N0") + " VNĐ</div>");
+            sb.AppendLine("                        <div class=\"total-usd\">≈ $" + usdFormatted + " USD</div>");
+            sb.AppendLine("                    </div>");
+            sb.AppendLine("                </div>");
+            sb.AppendLine("            </div>");
+            sb.AppendLine("            <p style=\"font-size:13px; color:#64748b; text-align:center; margin-bottom:12px;\">");
+            sb.AppendLine("                Chọn phương thức thanh toán bằng tài khoản PayPal hoặc Thẻ Quốc tế (Visa / Mastercard):");
+            sb.AppendLine("            </p>");
+            sb.AppendLine("            <div id=\"paypal-button-container\"></div>");
+            sb.AppendLine("            <div id=\"loading-box\" class=\"loading\">⏳ Đang xử lý giao dịch PayPal...</div>");
+            sb.AppendLine("        </div>");
+            sb.AppendLine("        <div class=\"success-box\" id=\"success-box\">");
+            sb.AppendLine("            <div class=\"success-icon\">✅</div>");
+            sb.AppendLine("            <div class=\"success-title\">THANH TOÁN THÀNH CÔNG!</div>");
+            sb.AppendLine("            <p class=\"success-msg\">");
+            sb.AppendLine("                Giao dịch của bạn đã được ghi nhận trên hệ thống phòng khám DTT Healthcare.<br><br>");
+            sb.AppendLine("                Bạn có thể đóng trang này.");
+            sb.AppendLine("            </p>");
+            sb.AppendLine("        </div>");
+            sb.AppendLine("        <script>");
+            sb.AppendLine("            if (window.paypal && paypal.Buttons) {");
+            sb.AppendLine("                paypal.Buttons({");
+            sb.AppendLine("                    style: {");
+            sb.AppendLine("                        layout: 'vertical',");
+            sb.AppendLine("                        color: 'gold',");
+            sb.AppendLine("                        shape: 'rect',");
+            sb.AppendLine("                        label: 'paypal'");
+            sb.AppendLine("                    },");
+            sb.AppendLine("                    async createOrder() {");
+            sb.AppendLine("                        const response = await fetch('/payment/create-paypal-order', {");
+            sb.AppendLine("                            method: 'POST',");
+            sb.AppendLine("                            headers: { 'Content-Type': 'application/json' },");
+            sb.AppendLine("                            body: JSON.stringify({ appointmentId: " + appointmentId + " })");
+            sb.AppendLine("                        });");
+            sb.AppendLine("                        const order = await response.json();");
+            sb.AppendLine("                        return order.id;");
+            sb.AppendLine("                    },");
+            sb.AppendLine("                    async onApprove(data) {");
+            sb.AppendLine("                        document.getElementById('loading-box').style.display = 'block';");
+            sb.AppendLine("                        const response = await fetch('/payment/capture-paypal-order?orderId=' + encodeURIComponent(data.orderID) + '&appointmentId=' + " + appointmentId + ", {");
+            sb.AppendLine("                            method: 'POST'");
+            sb.AppendLine("                        });");
+            sb.AppendLine("                        const details = await response.json();");
+            sb.AppendLine("                        document.getElementById('loading-box').style.display = 'none';");
+            sb.AppendLine("                        if (details && details.success) {");
+            sb.AppendLine("                            document.getElementById('checkout-content').style.display = 'none';");
+            sb.AppendLine("                            document.getElementById('success-box').style.display = 'block';");
+            sb.AppendLine("                        } else {");
+            sb.AppendLine("                            alert('Lỗi xác nhận thanh toán PayPal: ' + (details.message || ''));");
+            sb.AppendLine("                        }");
+            sb.AppendLine("                    },");
+            sb.AppendLine("                    onCancel(data) {");
+            sb.AppendLine("                        alert('Bạn đã hủy giao dịch PayPal.');");
+            sb.AppendLine("                    },");
+            sb.AppendLine("                    onError(err) {");
+            sb.AppendLine("                        console.error('PayPal Error:', err);");
+            sb.AppendLine("                    }");
+            sb.AppendLine("                }).render('#paypal-button-container');");
+            sb.AppendLine("            }");
+            sb.AppendLine("        </script>");
+        }
+        sb.AppendLine("    </div>");
+        sb.AppendLine("</body>");
+        sb.AppendLine("</html>");
+
+        string html = sb.ToString();
+        return Content(html, "text/html; charset=utf-8");
+    }
+
+    // [Old code VNPAY]:     // POST /api/Invoices/vnpay-create-payment-url
+    // [Old code VNPAY]:     // Tạo link và mã QR thanh toán VNPAY Sandbox qua IVnPayService
+    // [Old code VNPAY]:     [HttpPost("vnpay-create-payment-url")]
+    // [Old code VNPAY]:     public async Task<IActionResult> CreateVnPayPaymentUrl([FromBody] VnPayPaymentRequestDto req)
+    // [Old code VNPAY]:     {
+    // [Old code VNPAY]:         try
+    // [Old code VNPAY]:         {
+    // [Old code VNPAY]:             var appt = await _context.Appointments.FirstOrDefaultAsync(a => a.AppointmentId == req.AppointmentId);
+    // [Old code VNPAY]:             if (appt == null) return NotFound(new { success = false, message = "Không tìm thấy ca khám." });
+    // [Old code VNPAY]: 
+    // [Old code VNPAY]:             var patient = await _context.Patients.FirstOrDefaultAsync(p => p.PatientId == appt.PatientId);
+    // [Old code VNPAY]: 
+    // [Old code VNPAY]:             bool isPackage = appt.Note?.Contains("Gói khám:") == true;
+    // [Old code VNPAY]:             decimal examFee = isPackage ? (ExtractPriceFromNote(appt.Note) ?? 250000m) : 250000m;
+    // [Old code VNPAY]:             decimal servicesFee = await ComputeClsFeeAsync(req.AppointmentId);
+    // [Old code VNPAY]:             decimal medsFee = await ComputeMedsFeeAsync(req.AppointmentId);
+    // [Old code VNPAY]:             decimal totalAmount = examFee + servicesFee + medsFee;
+    // [Old code VNPAY]: 
+    // [Old code VNPAY]:             // [New code - Sử dụng VnPaymentRequestModel chuẩn và IVnPayService]:
+    // [Old code VNPAY]:             var vnPayModel = new VnPaymentRequestModel
+    // [Old code VNPAY]:             {
+    // [Old code VNPAY]:                 OrderId = req.AppointmentId,
+    // [Old code VNPAY]:                 FullName = patient?.FullName ?? "Bệnh nhân",
+    // [Old code VNPAY]:                 Description = $"Thanh toan vien phi ca #{req.AppointmentId} BN {patient?.FullName}",
+    // [Old code VNPAY]:                 Amount = (double)totalAmount,
+    // [Old code VNPAY]:                 CreatedDate = DateTime.Now
+    // [Old code VNPAY]:             };
+    // [Old code VNPAY]: 
+    // [Old code VNPAY]:             string paymentUrl = _vnPayService.CreatePaymentUrl(HttpContext, vnPayModel);
+    // [Old code VNPAY]: 
+    // [Old code VNPAY]:             return Ok(new
+    // [Old code VNPAY]:             {
+    // [Old code VNPAY]:                 success = true,
+    // [Old code VNPAY]:                 paymentUrl,
+    // [Old code VNPAY]:                 totalAmount,
+    // [Old code VNPAY]:                 appointmentId = req.AppointmentId,
+    // [Old code VNPAY]:                 patientName = patient?.FullName ?? "Bệnh nhân"
+    // [Old code VNPAY]:             });
+    // [Old code VNPAY]:         }
+    // [Old code VNPAY]:         catch (Exception ex)
+    // [Old code VNPAY]:         {
+    // [Old code VNPAY]:             return StatusCode(500, new { success = false, message = "Lỗi tạo URL VNPAY: " + ex.Message });
+    // [Old code VNPAY]:         }
+    // [Old code VNPAY]:     }
+    // [Old code VNPAY]: 
+    // [Old code VNPAY]:     // GET /api/Invoices/vnpay-callback
+    // [Old code VNPAY]:     // Nhận kết quả phản hồi từ Cổng VNPAY qua IVnPayService.PaymentExecute và cập nhật trạng thái thanh toán
+    // [Old code VNPAY]:     [HttpGet("vnpay-callback")]
+    // [Old code VNPAY]:     public async Task<IActionResult> VnPayCallback()
+    // [Old code VNPAY]:     {
+    // [Old code VNPAY]:         try
+    // [Old code VNPAY]:         {
+    // [Old code VNPAY]:             // [New code - Xử lý callback qua IVnPayService.PaymentExecute]:
+    // [Old code VNPAY]:             var response = _vnPayService.PaymentExecute(Request.Query);
+    // [Old code VNPAY]: 
+    // [Old code VNPAY]:             if (!response.Success)
+    // [Old code VNPAY]:             {
+    // [Old code VNPAY]:                 return Content("<h2 style='color:red;text-align:center;'>Chữ ký VNPAY không hợp lệ!</h2>", "text/html; charset=utf-8");
+    // [Old code VNPAY]:             }
+    // [Old code VNPAY]: 
+    // [Old code VNPAY]:             int.TryParse(response.OrderId, out int appointmentId);
+    // [Old code VNPAY]: 
+    // [Old code VNPAY]:             if (response.VnPayResponseCode == "00" && appointmentId > 0)
+    // [Old code VNPAY]:             {
+    // [Old code VNPAY]:                 // Giao dịch VNPAY thành công
+    // [Old code VNPAY]:                 var appt = await _context.Appointments.FirstOrDefaultAsync(a => a.AppointmentId == appointmentId);
+    // [Old code VNPAY]:                 var patient = appt != null ? await _context.Patients.FirstOrDefaultAsync(p => p.PatientId == appt.PatientId) : null;
+    // [Old code VNPAY]: 
+    // [Old code VNPAY]:                 decimal examFee = (appt?.Note?.Contains("Gói khám:") == true) ? (ExtractPriceFromNote(appt.Note) ?? 250000m) : 250000m;
+    // [Old code VNPAY]:                 decimal servicesFee = await ComputeClsFeeAsync(appointmentId);
+    // [Old code VNPAY]:                 decimal medsFee = await ComputeMedsFeeAsync(appointmentId);
+    // [Old code VNPAY]:                 decimal totalAmount = examFee + servicesFee + medsFee;
+    // [Old code VNPAY]: 
+    // [Old code VNPAY]:                 var invoice = await _context.Invoices.FirstOrDefaultAsync(i => i.AppointmentId == appointmentId);
+    // [Old code VNPAY]:                 if (invoice == null)
+    // [Old code VNPAY]:                 {
+    // [Old code VNPAY]:                     invoice = new Invoice
+    // [Old code VNPAY]:                     {
+    // [Old code VNPAY]:                         AppointmentId = appointmentId,
+    // [Old code VNPAY]:                         PatientId = patient?.PatientId ?? (appt?.PatientId ?? 0),
+    // [Old code VNPAY]:                         TotalAmount = totalAmount,
+    // [Old code VNPAY]:                         PaidAmount = totalAmount,
+    // [Old code VNPAY]:                         PaymentStatus = "paid",
+    // [Old code VNPAY]:                         PaymentMethod = "vnpay",
+    // [Old code VNPAY]:                         InvoiceDate = DateTime.UtcNow,
+    // [Old code VNPAY]:                         CreatedAt = DateTime.UtcNow,
+    // [Old code VNPAY]:                         UpdatedAt = DateTime.UtcNow
+    // [Old code VNPAY]:                     };
+    // [Old code VNPAY]:                     _context.Invoices.Add(invoice);
+    // [Old code VNPAY]:                 }
+    // [Old code VNPAY]:                 else
+    // [Old code VNPAY]:                 {
+    // [Old code VNPAY]:                     invoice.PaidAmount = totalAmount;
+    // [Old code VNPAY]:                     invoice.TotalAmount = totalAmount;
+    // [Old code VNPAY]:                     invoice.PaymentStatus = "paid";
+    // [Old code VNPAY]:                     invoice.PaymentMethod = "vnpay";
+    // [Old code VNPAY]:                     invoice.UpdatedAt = DateTime.UtcNow;
+    // [Old code VNPAY]:                 }
+    // [Old code VNPAY]:                 await _context.SaveChangesAsync();
+    // [Old code VNPAY]: 
+    // [Old code VNPAY]:                 // Gửi thông báo mobile
+    // [Old code VNPAY]:                 if (patient != null && patient.UserId != Guid.Empty)
+    // [Old code VNPAY]:                 {
+    // [Old code VNPAY]:                     _context.Notifications.Add(new Notification
+    // [Old code VNPAY]:                     {
+    // [Old code VNPAY]:                         UserId = patient.UserId,
+    // [Old code VNPAY]:                         Title = "Thanh Toán VNPAY Thành Công",
+    // [Old code VNPAY]:                         Content = $"Hóa đơn viện phí của bạn ({patient.FullName}) đã được thanh toán thành công qua Cổng VNPAY.\n\nMÃ GIAO DỊCH: {response.TransactionId}\nSỐ TIỀN: {totalAmount:N0} VNĐ\n\nCảm ơn bạn đã sử dụng dịch vụ tại DTT Healthcare!",
+    // [Old code VNPAY]:                         Type = "result",
+    // [Old code VNPAY]:                         RelatedId = invoice.InvoiceId,
+    // [Old code VNPAY]:                         RelatedType = "invoice",
+    // [Old code VNPAY]:                         IsRead = false,
+    // [Old code VNPAY]:                         CreatedAt = DateTime.UtcNow
+    // [Old code VNPAY]:                     });
+    // [Old code VNPAY]:                     await _context.SaveChangesAsync();
+    // [Old code VNPAY]:                 }
+    // [Old code VNPAY]: 
+    // [Old code VNPAY]:                 string successHtml = $@"
+    // [Old code VNPAY]: <!DOCTYPE html>
+    // [Old code VNPAY]: <html>
+    // [Old code VNPAY]: <head>
+    // [Old code VNPAY]:     <meta charset='utf-8'/>
+    // [Old code VNPAY]:     <title>Thanh Toán VNPAY Thành Công - DTT Healthcare</title>
+    // [Old code VNPAY]:     <style>
+    // [Old code VNPAY]:         body {{ font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background: #f0fdf4; display: flex; align-items: center; justify-content: center; height: 100vh; margin: 0; }}
+    // [Old code VNPAY]:         .card {{ background: white; padding: 40px; border-radius: 16px; box-shadow: 0 10px 25px rgba(0,0,0,0.08); text-align: center; max-width: 480px; width: 90%; }}
+    // [Old code VNPAY]:         .icon {{ font-size: 64px; color: #16a34a; margin-bottom: 16px; }}
+    // [Old code VNPAY]:         h1 {{ color: #166534; font-size: 24px; margin-bottom: 8px; }}
+    // [Old code VNPAY]:         p {{ color: #4b5563; font-size: 15px; line-height: 1.5; }}
+    // [Old code VNPAY]:         .amount {{ font-size: 28px; font-weight: bold; color: #0284c7; margin: 16px 0; }}
+    // [Old code VNPAY]:         .details {{ background: #f8fafc; border-radius: 8px; padding: 16px; text-align: left; font-size: 14px; color: #334155; margin-bottom: 24px; }}
+    // [Old code VNPAY]:         .btn {{ display: inline-block; background: #16a34a; color: white; padding: 12px 24px; border-radius: 8px; text-decoration: none; font-weight: bold; }}
+    // [Old code VNPAY]:     </style>
+    // [Old code VNPAY]: </head>
+    // [Old code VNPAY]: <body>
+    // [Old code VNPAY]:     <div class='card'>
+    // [Old code VNPAY]:         <div class='icon'>✅</div>
+    // [Old code VNPAY]:         <h1>THANH TOÁN THÀNH CÔNG</h1>
+    // [Old code VNPAY]:         <p>Giao dịch qua Cổng VNPAY đã được ghi nhận vào hệ thống bệnh viện.</p>
+    // [Old code VNPAY]:         <div class='amount'>{totalAmount:N0} VNĐ</div>
+    // [Old code VNPAY]:         <div class='details'>
+    // [Old code VNPAY]:             <div><strong>Ca khám:</strong> #{appointmentId}</div>
+    // [Old code VNPAY]:             <div><strong>Bệnh nhân:</strong> {patient?.FullName ?? "Bệnh nhân"}</div>
+    // [Old code VNPAY]:             <div><strong>Mã giao dịch VNPAY:</strong> {response.TransactionId}</div>
+    // [Old code VNPAY]:             <div><strong>Phương thức:</strong> Cổng VNPAY (VNPAY-QR / Thẻ ATM)</div>
+    // [Old code VNPAY]:         </div>
+    // [Old code VNPAY]:         <p style='color:#6b7280; font-size:13px;'>Bạn có thể đóng cửa sổ này và quay lại phần mềm.</p>
+    // [Old code VNPAY]:     </div>
+    // [Old code VNPAY]: </body>
+    // [Old code VNPAY]: </html>";
+    // [Old code VNPAY]:                 return Content(successHtml, "text/html; charset=utf-8");
+    // [Old code VNPAY]:             }
+    // [Old code VNPAY]:             else
+    // [Old code VNPAY]:             {
+    // [Old code VNPAY]:                 string failHtml = $@"
+    // [Old code VNPAY]: <!DOCTYPE html>
+    // [Old code VNPAY]: <html>
+    // [Old code VNPAY]: <head>
+    // [Old code VNPAY]:     <meta charset='utf-8'/>
+    // [Old code VNPAY]:     <title>Thanh Toán Không Thành Công</title>
+    // [Old code VNPAY]:     <style>
+    // [Old code VNPAY]:         body {{ font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background: #fef2f2; display: flex; align-items: center; justify-content: center; height: 100vh; margin: 0; }}
+    // [Old code VNPAY]:         .card {{ background: white; padding: 40px; border-radius: 16px; box-shadow: 0 10px 25px rgba(0,0,0,0.08); text-align: center; max-width: 480px; width: 90%; }}
+    // [Old code VNPAY]:         .icon {{ font-size: 64px; color: #dc2626; margin-bottom: 16px; }}
+    // [Old code VNPAY]:         h1 {{ color: #991b1b; font-size: 24px; margin-bottom: 8px; }}
+    // [Old code VNPAY]:         p {{ color: #4b5563; font-size: 15px; line-height: 1.5; }}
+    // [Old code VNPAY]:     </style>
+    // [Old code VNPAY]: </head>
+    // [Old code VNPAY]: <body>
+    // [Old code VNPAY]:     <div class='card'>
+    // [Old code VNPAY]:         <div class='icon'>❌</div>
+    // [Old code VNPAY]:         <h1>GIAO DỊCH KHÔNG THÀNH CÔNG</h1>
+    // [Old code VNPAY]:         <p>Giao dịch VNPAY đã bị hủy hoặc không thành công (Mã lỗi: {response.VnPayResponseCode}).</p>
+    // [Old code VNPAY]:     </div>
+    // [Old code VNPAY]: </body>
+    // [Old code VNPAY]: </html>";
+    // [Old code VNPAY]:                 return Content(failHtml, "text/html; charset=utf-8");
+    // [Old code VNPAY]:             }
+    // [Old code VNPAY]:         }
+    // [Old code VNPAY]:         catch (Exception ex)
+    // [Old code VNPAY]:         {
+    // [Old code VNPAY]:             return StatusCode(500, new { success = false, message = "Lỗi xử lý callback VNPAY: " + ex.Message });
+    // [Old code VNPAY]:         }
+    // [Old code VNPAY]:     }
+    // [Old code VNPAY]: 
+    // [Old code VNPAY]:     // GET /api/Invoices/status/{appointmentId}
+    // Kiểm tra trạng thái thanh toán hiện tại của ca khám
+    [HttpGet("status/{appointmentId}")]
+    public async Task<IActionResult> GetPaymentStatus(int appointmentId)
+    {
+        try
+        {
+            var invoice = await _context.Invoices.FirstOrDefaultAsync(i => i.AppointmentId == appointmentId);
+            bool isPaid = invoice != null && invoice.PaymentStatus == "paid";
+
+            return Ok(new
+            {
+                success = true,
+                appointmentId,
+                isPaid,
+                paymentStatus = invoice?.PaymentStatus ?? "unpaid",
+                paymentMethod = invoice?.PaymentMethod ?? "cash",
+                paidAmount = invoice?.PaidAmount ?? 0m,
+                totalAmount = invoice?.TotalAmount ?? 0m,
+                invoiceId = invoice?.InvoiceId ?? 0,
+                updatedAt = invoice?.UpdatedAt
+            });
+        }
+        catch (Exception ex)
+        {
+            return StatusCode(500, new { success = false, message = ex.Message });
+        }
+    }
+
+    private static string? GetLocalIpAddress()
+    {
+        try
+        {
+            var host = System.Net.Dns.GetHostEntry(System.Net.Dns.GetHostName());
+            foreach (var ip in host.AddressList)
+            {
+                if (ip.AddressFamily == System.Net.Sockets.AddressFamily.InterNetwork && ip.ToString().StartsWith("192.168."))
+                {
+                    return ip.ToString();
+                }
+            }
+            foreach (var ip in host.AddressList)
+            {
+                if (ip.AddressFamily == System.Net.Sockets.AddressFamily.InterNetwork && ip.ToString().StartsWith("10."))
+                {
+                    return ip.ToString();
+                }
+            }
+            foreach (var ip in host.AddressList)
+            {
+                if (ip.AddressFamily == System.Net.Sockets.AddressFamily.InterNetwork &&
+                    !System.Net.IPAddress.IsLoopback(ip) &&
+                    !ip.ToString().StartsWith("169.254") &&
+                    !ip.ToString().StartsWith("172.24"))
+                {
+                    return ip.ToString();
+                }
+            }
+        }
+        catch { }
+        return null;
+    }
+
 }
 
 public class ConfirmPaymentDto
@@ -596,4 +1421,14 @@ public class RegisterWalkInDto
     public string? Address { get; set; }
     public int DoctorId { get; set; }
     public string? SpecialtyName { get; set; }
+}
+
+public class VnPayPaymentRequestDto
+{
+    public int AppointmentId { get; set; }
+}
+
+public class PaypalCreateOrderDto
+{
+    public int AppointmentId { get; set; }
 }

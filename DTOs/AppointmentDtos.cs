@@ -47,6 +47,7 @@ public class AppointmentResponseDto
     public string Status { get; set; } = "Confirmed";
     /// <summary>Trạng thái thanh toán THẬT lấy từ bảng invoices ("paid" | "pending" | "unpaid") — không suy ra từ appointment.status_id.</summary>
     public string PaymentStatus { get; set; } = "unpaid";
+    public string? PaymentMethod { get; set; }
     public int QueueNumber { get; set; }
     public string ClinicRoom { get; set; } = "Phòng 101";
     public string Fee { get; set; } = "250.000đ";

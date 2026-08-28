@@ -698,6 +698,39 @@ public class AppointmentsController : ControllerBase
         var cancellerUserIds = list.Where(a => a.CancelledBy.HasValue && a.CancelledBy.Value != Guid.Empty).Select(a => a.CancelledBy!.Value).Distinct().ToList();
         var cancellerUserMap = await _context.Users.AsNoTracking().Where(u => cancellerUserIds.Contains(u.UserId)).ToDictionaryAsync(u => u.UserId);
 
+        // Tính trước phí thuốc thật cho toàn bộ danh sách lịch hẹn để WinForms & Mobile hiển thị đúng ngay lập tức
+        var recordList = await _context.MedicalRecords.AsNoTracking()
+            .Where(m => apptIds.Contains(m.AppointmentId))
+            .Select(m => new { m.MedicalRecordId, m.AppointmentId })
+            .ToListAsync();
+        var recordIds = recordList.Select(r => r.MedicalRecordId).ToList();
+        var recordToApptMap = recordList.ToDictionary(r => r.MedicalRecordId, r => r.AppointmentId);
+
+        var presList = await _context.Prescriptions.AsNoTracking()
+            .Where(p => recordIds.Contains(p.MedicalRecordId))
+            .Select(p => new { p.PrescriptionId, p.MedicalRecordId })
+            .ToListAsync();
+        var presIds = presList.Select(p => p.PrescriptionId).ToList();
+        var presToRecordMap = presList.ToDictionary(p => p.PrescriptionId, p => p.MedicalRecordId);
+
+        var details = await (from pd in _context.PrescriptionDetails.AsNoTracking()
+                             where presIds.Contains(pd.PrescriptionId)
+                             join m in _context.Medicines.AsNoTracking() on pd.MedicineId equals m.MedicineId
+                             select new { pd.PrescriptionId, pd.Quantity, m.Price })
+                             .ToListAsync();
+
+        var medsFeeMap = new Dictionary<int, decimal>();
+        foreach (var d in details)
+        {
+            if (presToRecordMap.TryGetValue(d.PrescriptionId, out int recId) &&
+                recordToApptMap.TryGetValue(recId, out int targetApptId))
+            {
+                decimal unitP = d.Price > 0 ? d.Price : 15000m;
+                decimal sub = d.Quantity * unitP;
+                medsFeeMap[targetApptId] = medsFeeMap.GetValueOrDefault(targetApptId) + sub;
+            }
+        }
+
         foreach (var appt in list)
         {
             doctors.TryGetValue(appt.DoctorId, out var doctor);
@@ -727,24 +760,41 @@ public class AppointmentsController : ControllerBase
             // marker DUY NHẤT do chính HealthPackagesController.BookPackage ghi lúc tạo, đáng tin cậy.
             bool isPkg = appt.Note?.Contains("Gói khám:") == true;
 
-            // Lấy tổng viện phí thực tế từ Hóa đơn (bao gồm Công khám + Phí thuốc do Bác sĩ kê)
-            string feeStr = "250.000đ";
-            if (invoiceMap.ContainsKey(appt.AppointmentId))
+            // Lấy tổng viện phí thực tế chuẩn xác (Công khám + Phí thuốc đơn thuốc điện tử)
+            decimal baseExam = 250000m;
+            if (isPkg && !string.IsNullOrEmpty(appt.Note))
             {
-                feeStr = $"{invoiceMap[appt.AppointmentId].TotalAmount:N0}đ";
+                var matchPrice = System.Text.RegularExpressions.Regex.Match(appt.Note, @"(\d[\d\.\,]*)\s*(?:đ|VNĐ|VND)", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+                if (matchPrice.Success)
+                {
+                    string clean = matchPrice.Groups[1].Value.Replace(".", "").Replace(",", "").Trim();
+                    if (decimal.TryParse(clean, out decimal parsedPkg)) baseExam = parsedPkg;
+                }
             }
-            else if (!string.IsNullOrEmpty(appt.Note) && appt.Note.Contains("|"))
+            decimal apptMeds = medsFeeMap.GetValueOrDefault(appt.AppointmentId, 0m);
+            decimal totalCalculated = baseExam + apptMeds;
+
+            if (invoiceMap.TryGetValue(appt.AppointmentId, out var apptInv) && apptInv.TotalAmount > 0)
+            {
+                totalCalculated = apptInv.TotalAmount;
+            }
+            else if (!isPkg && !string.IsNullOrEmpty(appt.Note) && appt.Note.Contains("|"))
             {
                 var parts = appt.Note.Split('|');
                 foreach (var p in parts)
                 {
                     if (p.Trim().EndsWith("đ") || p.Trim().EndsWith("VNĐ") || p.Trim().Contains(".000"))
                     {
-                        feeStr = p.Trim();
+                        string clean = p.Trim().Replace("đ", "").Replace("VNĐ", "").Replace(".", "").Replace(",", "").Trim();
+                        if (decimal.TryParse(clean, out decimal notePrice) && notePrice > 0)
+                        {
+                            totalCalculated = notePrice + apptMeds;
+                        }
                         break;
                     }
                 }
             }
+            string feeStr = $"{totalCalculated:N0}đ";
 
             if (isPkg)
             {
@@ -862,6 +912,7 @@ public class AppointmentsController : ControllerBase
                 TimeSlot = timeStr,
                 Status = statusStr,
                 PaymentStatus = invoiceMap.TryGetValue(appt.AppointmentId, out var apptInvoice) ? apptInvoice.PaymentStatus : "unpaid",
+                PaymentMethod = invoiceMap.TryGetValue(appt.AppointmentId, out var apptInvMethod) ? apptInvMethod.PaymentMethod : null,
                 QueueNumber = appt.QueueNumber,
                 ClinicRoom = isPkg ? "" : (doctor?.ClinicRoom ?? "Phòng 101"),
                 Fee = feeStr,

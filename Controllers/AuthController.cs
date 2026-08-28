@@ -440,10 +440,11 @@ public class AuthController : ControllerBase
 
         // Update user status & patient verification status in database upon OTP confirmation
         var user = await _context.Users.FirstOrDefaultAsync(u => u.PhoneNumber == dto.Phone);
+        Patient? patient = null;
         if (user != null)
         {
             user.Status = "Active";
-            var patient = await _context.Patients.FirstOrDefaultAsync(p => p.UserId == user.UserId);
+            patient = await _context.Patients.FirstOrDefaultAsync(p => p.UserId == user.UserId);
             if (patient != null)
             {
                 patient.VerificationStatus = "verified";
@@ -451,7 +452,21 @@ public class AuthController : ControllerBase
             }
             await _context.SaveChangesAsync();
         }
-        return Ok(new { success = true, message = "Xác minh mã OTP thành công." });
+
+        var token = user != null ? GenerateJwtToken(user) : null;
+
+        return Ok(new
+        {
+            success = true,
+            message = "Xác minh mã OTP thành công.",
+            token = token,
+            userId = user?.UserId,
+            patientId = patient?.PatientId ?? 0,
+            fullName = patient?.FullName ?? "Bệnh nhân",
+            phone = user?.PhoneNumber,
+            email = user?.Email,
+            verificationStatus = patient?.VerificationStatus ?? "verified"
+        });
     }
 
     // POST /api/auth/reset-password — Đặt lại mật khẩu sau khi xác minh OTP

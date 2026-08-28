@@ -26,6 +26,16 @@ builder.Services.AddResponseCompression(options =>
 });
 
 builder.Services.AddControllers();
+// Đăng ký PaypalClient dạng Singleton theo chuẩn hướng dẫn tích hợp PayPal
+builder.Services.AddSingleton<DTT_Backend_API.Models.PaypalClient>(x =>
+    new DTT_Backend_API.Models.PaypalClient(
+        builder.Configuration["PayPalOptions:ClientId"] ?? "",
+        builder.Configuration["PayPalOptions:ClientSecret"] ?? "",
+        builder.Configuration["PayPalOptions:Mode"] ?? "Sandbox"
+    )
+);
+
+builder.Services.AddSingleton<IVnPayService, VnPayService>();
 builder.Services.AddSignalR();
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen(options =>

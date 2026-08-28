@@ -428,10 +428,13 @@ FodyWeavers.xsd
 *.msm
 *.msp
 
-# Secrets — appsettings.json holds the live DB connection string + Gemini API key in plaintext.
-# It was previously committed (and pushed to a PUBLIC repo) by mistake; untracked going forward.
-# See appsettings.json.example for the expected shape with placeholder values.
+# Secrets — appsettings.json holds the live DB connection string + credentials
 appsettings.json
+appsettings.Development.json
+appsettings.Production.json
+appsettings.*.json
+!appsettings.example.json
+!appsettings.json.example
 # file md
 API_DOCUMENTATION.md
 PasswordHashGenerator.cs
