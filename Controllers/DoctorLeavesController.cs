@@ -1,6 +1,7 @@
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using DTT_Backend_API.Data;
+using DTT_Backend_API.Helpers;
 using DTT_Backend_API.Models;
 using System.ComponentModel.DataAnnotations;
 using System.Data;
@@ -207,6 +208,7 @@ public class DoctorLeavesController : ControllerBase
     [HttpPut("{id}/status")]
     public async Task<IActionResult> UpdateLeaveStatus(int id, [FromBody] UpdateLeaveStatusDto dto)
     {
+        if (!AccessControl.IsStaff(User)) return this.ForbidJson();
         try
         {
             var leave = await _context.DoctorLeaves.FirstOrDefaultAsync(l => l.LeaveId == id);
@@ -328,6 +330,7 @@ public class DoctorLeavesController : ControllerBase
     [HttpPost]
     public async Task<IActionResult> CreateLeave([FromBody] CreateDoctorLeaveDto dto)
     {
+        if (!AccessControl.IsStaff(User)) return this.ForbidJson();
         try
         {
             var doctor = await _context.Doctors.FirstOrDefaultAsync(d => d.DoctorId == dto.DoctorId);

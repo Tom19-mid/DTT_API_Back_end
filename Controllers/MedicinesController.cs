@@ -2,6 +2,7 @@ using System.ComponentModel.DataAnnotations;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using DTT_Backend_API.Data;
+using DTT_Backend_API.Helpers;
 using DTT_Backend_API.Models;
 
 namespace DTT_Backend_API.Controllers;
@@ -274,6 +275,7 @@ public class MedicinesController : ControllerBase
     [HttpPost]
     public async Task<IActionResult> CreateMedicine([FromBody] CreateMedicineDto dto)
     {
+        if (!AccessControl.IsStaff(User)) return this.ForbidJson();
         if (!ModelState.IsValid)
         {
             return BadRequest(ModelState);
@@ -317,6 +319,7 @@ public class MedicinesController : ControllerBase
     [HttpPut("{id:int}")]
     public async Task<IActionResult> UpdateMedicine(int id, [FromBody] UpdateMedicineDto dto)
     {
+        if (!AccessControl.IsStaff(User)) return this.ForbidJson();
         if (!ModelState.IsValid)
         {
             return BadRequest(ModelState);
@@ -362,6 +365,7 @@ public class MedicinesController : ControllerBase
     [HttpPut("{id:int}/status")]
     public async Task<IActionResult> UpdateMedicineStatus(int id, [FromBody] UpdateMedicineStatusDto dto)
     {
+        if (!AccessControl.IsStaff(User)) return this.ForbidJson();
         try
         {
             var medicine = await _context.Medicines.FindAsync(id);
@@ -386,6 +390,7 @@ public class MedicinesController : ControllerBase
     [HttpDelete("{id:int}")]
     public async Task<IActionResult> DeleteMedicine(int id)
     {
+        if (!AccessControl.IsStaff(User)) return this.ForbidJson();
         try
         {
             var medicine = await _context.Medicines.FindAsync(id);
@@ -492,6 +497,7 @@ public class MedicinesController : ControllerBase
     [HttpPost("categories")]
     public async Task<IActionResult> CreateCategory([FromBody] CreateMedicineCategoryDto dto)
     {
+        if (!AccessControl.IsStaff(User)) return this.ForbidJson();
         if (!ModelState.IsValid)
         {
             return BadRequest(ModelState);
@@ -533,6 +539,7 @@ public class MedicinesController : ControllerBase
     [HttpPut("categories/{id:int}")]
     public async Task<IActionResult> UpdateCategory(int id, [FromBody] UpdateMedicineCategoryDto dto)
     {
+        if (!AccessControl.IsStaff(User)) return this.ForbidJson();
         if (!ModelState.IsValid)
         {
             return BadRequest(ModelState);
@@ -572,6 +579,7 @@ public class MedicinesController : ControllerBase
     [HttpPut("categories/{id:int}/status")]
     public async Task<IActionResult> UpdateCategoryStatus(int id, [FromBody] UpdateMedicineCategoryStatusDto dto)
     {
+        if (!AccessControl.IsStaff(User)) return this.ForbidJson();
         try
         {
             var category = await _context.MedicineCategories.FindAsync(id);
@@ -597,6 +605,7 @@ public class MedicinesController : ControllerBase
     [HttpDelete("categories/{id:int}")]
     public async Task<IActionResult> DeleteCategory(int id)
     {
+        if (!AccessControl.IsStaff(User)) return this.ForbidJson();
         try
         {
             var category = await _context.MedicineCategories.FindAsync(id);

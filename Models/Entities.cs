@@ -221,6 +221,12 @@ public class Specialty
 
     [Column("status")]
     public bool Status { get; set; } = true;
+
+    [Column("created_at")]
+    public DateTime? CreatedAt { get; set; }
+
+    [Column("updated_at")]
+    public DateTime? UpdatedAt { get; set; }
 }
 
 [Table("icd10_catalog")]
@@ -296,6 +302,12 @@ public class Doctor
     // đăng nhập/dùng thử WinForms bình thường), thay vì phải chạy SQL tay mỗi lần có hồ sơ test mới.
     [Column("is_test_data")]
     public bool IsTestData { get; set; } = false;
+
+    [Column("created_at")]
+    public DateTime? CreatedAt { get; set; }
+
+    [Column("updated_at")]
+    public DateTime? UpdatedAt { get; set; }
 }
 
 [Table("doctor_leaves")]
@@ -424,8 +436,14 @@ public class MedicalRecord
     [Column("patient_id")]
     public int PatientId { get; set; }
 
+    [Column("member_id")]
+    public int? MemberId { get; set; }
+
     [Column("doctor_id")]
     public int DoctorId { get; set; }
+
+    [Column("admission_reason")]
+    public string? AdmissionReason { get; set; }
 
     [Column("symptoms")]
     public string? Symptoms { get; set; }
@@ -663,6 +681,9 @@ public class Invoice
 
     [Column("patient_id")]
     public int PatientId { get; set; }
+
+    [Column("member_id")]
+    public int? MemberId { get; set; }
 
     [Column("total_amount")]
     public decimal TotalAmount { get; set; }

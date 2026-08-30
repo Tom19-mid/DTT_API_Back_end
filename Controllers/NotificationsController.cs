@@ -11,7 +11,6 @@ using DTT_Backend_API.Models;
 namespace DTT_Backend_API.Controllers;
 
 [ApiController]
-[AllowAnonymous]
 [Route("api/[controller]")]
 public class NotificationsController : ControllerBase
 {
@@ -36,18 +35,23 @@ public class NotificationsController : ControllerBase
             */
             var query = _context.Notifications.AsNoTracking().AsQueryable();
 
+            var claimIdStr = User.FindFirst(ClaimTypes.NameIdentifier)?.Value ?? User.FindFirst("user_id")?.Value;
+            Guid.TryParse(claimIdStr, out var callerUserId);
+
             Guid filterUserId = Guid.Empty;
             if (!string.IsNullOrWhiteSpace(userId) && Guid.TryParse(userId, out var parsedQueryId))
             {
+                // Chống IDOR: bệnh nhân (role_id=3) không được truyền ?userId=<người khác> để đọc
+                // trộm thông báo của người dùng khác — chỉ nhân viên y tế mới được tra cứu chéo.
+                if (!AccessControl.IsStaff(User) && parsedQueryId != callerUserId)
+                {
+                    return this.ForbidJson();
+                }
                 filterUserId = parsedQueryId;
             }
             else
             {
-                var claimIdStr = User.FindFirst(ClaimTypes.NameIdentifier)?.Value ?? User.FindFirst("user_id")?.Value;
-                if (!string.IsNullOrWhiteSpace(claimIdStr) && Guid.TryParse(claimIdStr, out var parsedClaimId))
-                {
-                    filterUserId = parsedClaimId;
-                }
+                filterUserId = callerUserId;
             }
 
             if (filterUserId != Guid.Empty)
@@ -99,7 +103,10 @@ public class NotificationsController : ControllerBase
     }
 
     // ── POST /api/notifications (Tạo mới thông báo từ Admin) ─────────────────
+    // Chỉ Web Admin (nhân viên y tế) mới có màn tạo/phát thông báo — bệnh nhân gọi endpoint
+    // này có thể tự phát spam/thông báo giả tới toàn bộ bệnh nhân hoặc bác sĩ khác.
     [HttpPost]
+    [StaffOnly]
     public async Task<IActionResult> CreateNotification([FromBody] CreateNotificationDto dto)
     {
         try
@@ -285,6 +292,8 @@ public class NotificationsController : ControllerBase
                 return NotFound(new { success = false, message = "Không tìm thấy thông báo cần xóa." });
             }
 
+            if (!AccessControl.CanAccessUserId(User, noti.UserId)) return this.ForbidJson();
+
             _context.Notifications.Remove(noti);
             await _context.SaveChangesAsync();
 
@@ -316,15 +325,19 @@ public class NotificationsController : ControllerBase
         try
         {
             var patient = await _context.Patients.FirstOrDefaultAsync(p => p.PatientId == patientId);
-            Guid targetUserId = patient?.UserId ?? Guid.Empty;
+            if (patient == null)
+            {
+                return NotFound(new { success = false, message = "Không tìm thấy bệnh nhân." });
+            }
+            Guid targetUserId = patient.UserId;
 
             var list = await _context.Notifications
-                .Where(n => n.UserId == targetUserId || targetUserId == Guid.Empty)
+                .Where(n => n.UserId == targetUserId)
                 .OrderByDescending(n => n.CreatedAt)
                 .ToListAsync();
 
             // Auto-seed welcome & sample notifications if empty so app UI looks great & alive
-            if (list.Count == 0 && patient != null)
+            if (list.Count == 0)
             {
                 list = new List<Notification>
                 {
@@ -422,10 +435,14 @@ public class NotificationsController : ControllerBase
         try
         {
             var patient = await _context.Patients.FirstOrDefaultAsync(p => p.PatientId == patientId);
-            Guid targetUserId = patient?.UserId ?? Guid.Empty;
+            if (patient == null)
+            {
+                return NotFound(new { success = false, message = "Không tìm thấy bệnh nhân." });
+            }
+            Guid targetUserId = patient.UserId;
 
             var unread = await _context.Notifications
-                .Where(n => (n.UserId == targetUserId || targetUserId == Guid.Empty) && !n.IsRead)
+                .Where(n => n.UserId == targetUserId && !n.IsRead)
                 .ToListAsync();
 
             foreach (var item in unread)

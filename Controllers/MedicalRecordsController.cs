@@ -5,6 +5,7 @@ using System.Threading.Tasks;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using DTT_Backend_API.Data;
+using DTT_Backend_API.Helpers;
 using DTT_Backend_API.Models;
 
 namespace DTT_Backend_API.Controllers
@@ -24,6 +25,10 @@ namespace DTT_Backend_API.Controllers
         [HttpGet("all")]
         public async Task<IActionResult> GetAllMedicalRecords([FromQuery] string? search, [FromQuery] int? doctorId, [FromQuery] int? patientId)
         {
+            // Danh sách toàn viện (lọc tùy chọn theo doctorId/patientId/search) — chỉ dành cho nhân viên
+            // y tế tra cứu (WinForms), bệnh nhân phải dùng GET /api/MedicalRecords/patient/{patientId}
+            // (đã kiểm tra quyền sở hữu riêng bên dưới).
+            if (!AccessControl.IsStaff(User)) return this.ForbidJson();
             try
             {
                 var query = _context.MedicalRecords.AsQueryable();
@@ -88,9 +93,9 @@ namespace DTT_Backend_API.Controllers
                         ? string.Join(", ", details.Select(d => $"{d.MedicineNameSnapshot} ({d.Quantity} {d.UnitSnapshot})"))
                         : (rx != null && !string.IsNullOrEmpty(rx.Note) ? rx.Note : "");
 
-                    string patientName = patient?.FullName ?? "Bá»‡nh nhÃ¢n";
+                    string patientName = patient?.FullName ?? "Bệnh nhân";
                     string phone = patient?.PhoneNumber ?? "";
-                    string doctorName = doctor != null ? $"{doctor.Degree} {doctor.FullName}".Trim() : "BÃ¡c sÄ©";
+                    string doctorName = doctor != null ? $"{doctor.Degree} {doctor.FullName}".Trim() : "Bác sĩ";
 
                     // Filter search if provided
                     if (!string.IsNullOrWhiteSpace(search))
@@ -167,6 +172,7 @@ namespace DTT_Backend_API.Controllers
         [HttpGet("patient/{patientId}")]
         public async Task<IActionResult> GetMedicalRecordsByPatient(int patientId)
         {
+            if (!await AccessControl.CanAccessPatientAsync(User, _context, patientId)) return this.ForbidJson();
             try
             {
                 var records = await _context.MedicalRecords
@@ -516,7 +522,7 @@ namespace DTT_Backend_API.Controllers
 
                 if (record == null)
                 {
-                    return NotFound(new { message = "KhÃ´ng tÃ¬m tháº¥y há»“ sÆ¡ bá»‡nh Ã¡n." });
+                    return NotFound(new { message = "Không tìm thấy hồ sơ bệnh án." });
                 }
 
                 var prescriptions = await _context.Prescriptions
@@ -547,7 +553,7 @@ namespace DTT_Backend_API.Controllers
         {
             if (dto == null)
             {
-                return BadRequest(new { message = "Dá»¯ liá»‡u khÃ´ng há»£p lá»‡." });
+                return BadRequest(new { message = "Dữ liệu không hợp lệ." });
             }
 
             try
@@ -639,7 +645,7 @@ namespace DTT_Backend_API.Controllers
                     await _context.SaveChangesAsync();
                 }
 
-                // 3. Update appointment status: Náº¿u cÃ³ kÃª Ä‘Æ¡n thuá»‘c -> chuyá»ƒn sang StatusId = 10 (PendingDispensing) Ä‘á»ƒ Dược sĩ phÃ¡t thuá»‘c
+                // 3. Update appointment status: Nếu có kê đơn thuốc -> chuyển sang StatusId = 10 (PendingDispensing) để Du?c si phát thuốc
                 var appt = await _context.Appointments.FirstOrDefaultAsync(a => a.AppointmentId == dto.AppointmentId);
                 if (appt != null)
                 {
@@ -666,11 +672,11 @@ namespace DTT_Backend_API.Controllers
         }
 
         // =========================================================================
-        // â”€â”€ PHÃ‚N Há»† DÆ¯á»¢C SÄ¨ (PHARMACY DISPENSING) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+        // ── PHÂN HỆ DƯỢC SĨ (PHARMACY DISPENSING) ──────────────────────────────
         // =========================================================================
 
         // =========================================================================
-        // [Old code - GetPharmacyQueue khÃ´ng lá»c ngÃ y hÃ´m nay]:
+        // [Old code - GetPharmacyQueue không lọc ngày hôm nay]:
         // [HttpGet("pharmacy-queue")]
         // public async Task<IActionResult> GetPharmacyQueue()
         // {
@@ -798,7 +804,7 @@ namespace DTT_Backend_API.Controllers
         }
 
         // =========================================================================
-        // [Old code - GetPharmacyHistory khÃ´ng lá»c tÃ¬m kiáº¿m vÃ  khÃ´ng tráº£ vá» items chi tiáº¿t]:
+        // [Old code - GetPharmacyHistory không lọc tìm kiếm và không trả về items chi tiết]:
         // [HttpGet("pharmacy-history")]
         // public async Task<IActionResult> GetPharmacyHistory([FromQuery] string? date) { ... }
         // =========================================================================
@@ -982,27 +988,6 @@ namespace DTT_Backend_API.Controllers
             }
         }
 
-            // GET /api/MedicalRecords/fix-rx43-note
-    [HttpGet("fix-rx43-note")]
-    public async Task<IActionResult> FixRx43Note()
-    {
-        try
-        {
-            var rx = await _context.Prescriptions.FirstOrDefaultAsync(p => p.PrescriptionId == 43);
-            if (rx != null)
-            {
-                rx.Note = "Nghá»‰ ngÆ¡i | [Dược sĩ]: Ä‚n uá»‘ng Ä‘iá»u Ä‘á»™, uá»‘ng thuá»‘c Ä‘áº§y Ä‘á»§";
-                rx.UpdatedAt = DateTime.UtcNow;
-                await _context.SaveChangesAsync();
-            }
-            return Ok(new { success = true });
-        }
-        catch (Exception ex)
-        {
-            return StatusCode(500, new { message = ex.Message });
-        }
-    }
-
     // POST /api/MedicalRecords/{appointmentId}/dispense
         [HttpPost("{appointmentId}/dispense")]
         public async Task<IActionResult> DispensePrescription(int appointmentId, [FromBody] DispenseDto dto)
@@ -1012,18 +997,18 @@ namespace DTT_Backend_API.Controllers
                 var record = await _context.MedicalRecords.FirstOrDefaultAsync(r => r.AppointmentId == appointmentId);
                 if (record == null)
                 {
-                    return NotFound(new { success = false, message = "KhÃ´ng tÃ¬m tháº¥y há»“ sÆ¡ bá»‡nh Ã¡n cho ca khÃ¡m nÃ y." });
+                    return NotFound(new { success = false, message = "Không tìm thấy hồ sơ bệnh án cho ca khám này." });
                 }
 
                 var rx = await _context.Prescriptions.FirstOrDefaultAsync(p => p.MedicalRecordId == record.MedicalRecordId);
                 if (rx == null)
                 {
-                    return NotFound(new { success = false, message = "KhÃ´ng tÃ¬m tháº¥y Ä‘Æ¡n thuá»‘c cho ca khÃ¡m nÃ y." });
+                    return NotFound(new { success = false, message = "Không tìm thấy đơn thuốc cho ca khám này." });
                 }
 
-                // Cáº­p nháº­t tráº¡ng thÃ¡i Ä‘Æ¡n thuá»‘c
+                // Cập nhật trạng thái đơn thuốc
                 // [Old code]: rx.Status = "Dispensed";
-                // [New code - GÃ¡n Completed phÃ¹ há»£p vá»›i PostgreSQL prescriptions_status_check]:
+                // [New code - Gán Completed phù hợp với PostgreSQL prescriptions_status_check]:
                 // [New code - Ghi nhận trực tiếp vào 2 cột dispensed_by, dispensed_at trong database]:
                 rx.Status = "Completed";
                 rx.DispensedBy = dto?.PharmacistUserId;
@@ -1113,47 +1098,47 @@ namespace DTT_Backend_API.Controllers
                     });
                 }
 
-                // Danh sÃ¡ch dá»± phÃ²ng náº¿u báº£ng cÆ¡ sá»Ÿ dá»¯ liá»‡u chÆ°a náº¡p Ä‘á»§ mÃ£
+                // Danh sách dự phòng nếu bảng cơ sở dữ liệu chưa nạp đủ mã
                 var fallbacks = new List<dynamic>
                 {
-                    // Da liá»…u (SpecialtyId = 4 / Da liá»…u)
-                    new { icdCode = "L20", diseaseName = "ViÃªm da cÆ¡ Ä‘á»‹a (Atopic Dermatitis)", chapterName = "Bá»‡nh da vÃ  mÃ´ dÆ°á»›i da", isCommon = true, specialtyId = 4, isPreferred = specialtyId == 4 },
-                    new { icdCode = "L70", diseaseName = "Má»¥n trá»©ng cÃ¡ (Acne Vulgaris)", chapterName = "Bá»‡nh da vÃ  mÃ´ dÆ°á»›i da", isCommon = true, specialtyId = 4, isPreferred = specialtyId == 4 },
-                    new { icdCode = "L30", diseaseName = "ViÃªm da khÃ¡c (Eczema)", chapterName = "Bá»‡nh da vÃ  mÃ´ dÆ°á»›i da", isCommon = true, specialtyId = 4, isPreferred = specialtyId == 4 },
-                    new { icdCode = "L50", diseaseName = "MÃ y Ä‘ay (Urticaria)", chapterName = "Bá»‡nh da vÃ  mÃ´ dÆ°á»›i da", isCommon = true, specialtyId = 4, isPreferred = specialtyId == 4 },
-                    new { icdCode = "B35", diseaseName = "Bá»‡nh náº¥m da (Dermatophytosis)", chapterName = "Bá»‡nh nhiá»…m trÃ¹ng da", isCommon = true, specialtyId = 4, isPreferred = specialtyId == 4 },
-                    new { icdCode = "B02", diseaseName = "Bá»‡nh Zona (Herpes zoster)", chapterName = "Bá»‡nh nhiá»…m virus da", isCommon = true, specialtyId = 4, isPreferred = specialtyId == 4 },
-                    new { icdCode = "L40", diseaseName = "Bá»‡nh váº£y náº¿n (Psoriasis)", chapterName = "Bá»‡nh da vÃ  mÃ´ dÆ°á»›i da", isCommon = true, specialtyId = 4, isPreferred = specialtyId == 4 },
-                    new { icdCode = "L23", diseaseName = "ViÃªm da tiáº¿p xÃºc dá»‹ á»©ng", chapterName = "Bá»‡nh da vÃ  mÃ´ dÆ°á»›i da", isCommon = true, specialtyId = 4, isPreferred = specialtyId == 4 },
-                    new { icdCode = "L80", diseaseName = "Bá»‡nh báº¡ch biáº¿n (Vitiligo)", chapterName = "Bá»‡nh da vÃ  mÃ´ dÆ°á»›i da", isCommon = true, specialtyId = 4, isPreferred = specialtyId == 4 },
+                    // Da liễu (SpecialtyId = 4 / Da liễu)
+                    new { icdCode = "L20", diseaseName = "Viêm da cơ địa (Atopic Dermatitis)", chapterName = "Bệnh da và mô dưới da", isCommon = true, specialtyId = 4, isPreferred = specialtyId == 4 },
+                    new { icdCode = "L70", diseaseName = "Mụn trứng cá (Acne Vulgaris)", chapterName = "Bệnh da và mô dưới da", isCommon = true, specialtyId = 4, isPreferred = specialtyId == 4 },
+                    new { icdCode = "L30", diseaseName = "Viêm da khác (Eczema)", chapterName = "Bệnh da và mô dưới da", isCommon = true, specialtyId = 4, isPreferred = specialtyId == 4 },
+                    new { icdCode = "L50", diseaseName = "Mày đay (Urticaria)", chapterName = "Bệnh da và mô dưới da", isCommon = true, specialtyId = 4, isPreferred = specialtyId == 4 },
+                    new { icdCode = "B35", diseaseName = "Bệnh nấm da (Dermatophytosis)", chapterName = "Bệnh nhiễm trùng da", isCommon = true, specialtyId = 4, isPreferred = specialtyId == 4 },
+                    new { icdCode = "B02", diseaseName = "Bệnh Zona (Herpes zoster)", chapterName = "Bệnh nhiễm virus da", isCommon = true, specialtyId = 4, isPreferred = specialtyId == 4 },
+                    new { icdCode = "L40", diseaseName = "Bệnh vảy nến (Psoriasis)", chapterName = "Bệnh da và mô dưới da", isCommon = true, specialtyId = 4, isPreferred = specialtyId == 4 },
+                    new { icdCode = "L23", diseaseName = "Viêm da tiếp xúc dị ứng", chapterName = "Bệnh da và mô dưới da", isCommon = true, specialtyId = 4, isPreferred = specialtyId == 4 },
+                    new { icdCode = "L80", diseaseName = "Bệnh bạch biến (Vitiligo)", chapterName = "Bệnh da và mô dưới da", isCommon = true, specialtyId = 4, isPreferred = specialtyId == 4 },
 
-                    // HÃ´ háº¥p / Tai mÅ©i há»ng (SpecialtyId = 1)
-                    new { icdCode = "J00", diseaseName = "ViÃªm mÅ©i há»ng cáº¥p tÃ­nh (Cáº£m láº¡nh)", chapterName = "Bá»‡nh há»‡ hÃ´ háº¥p", isCommon = true, specialtyId = 1, isPreferred = specialtyId == 1 },
-                    new { icdCode = "J02", diseaseName = "ViÃªm há»ng cáº¥p", chapterName = "Bá»‡nh há»‡ hÃ´ háº¥p", isCommon = true, specialtyId = 1, isPreferred = specialtyId == 1 },
-                    new { icdCode = "J03", diseaseName = "ViÃªm amiÄ‘an cáº¥p", chapterName = "Bá»‡nh há»‡ hÃ´ háº¥p", isCommon = true, specialtyId = 1, isPreferred = specialtyId == 1 },
-                    new { icdCode = "J20", diseaseName = "ViÃªm pháº¿ quáº£n cáº¥p", chapterName = "Bá»‡nh há»‡ hÃ´ háº¥p", isCommon = true, specialtyId = 1, isPreferred = specialtyId == 1 },
-                    new { icdCode = "J01", diseaseName = "ViÃªm xoang cáº¥p", chapterName = "Bá»‡nh há»‡ hÃ´ háº¥p", isCommon = true, specialtyId = 1, isPreferred = specialtyId == 1 },
-                    new { icdCode = "J45", diseaseName = "Hen pháº¿ quáº£n (Suyá»…n)", chapterName = "Bá»‡nh há»‡ hÃ´ háº¥p", isCommon = true, specialtyId = 1, isPreferred = specialtyId == 1 },
+                    // Hô hấp / Tai mũi họng (SpecialtyId = 1)
+                    new { icdCode = "J00", diseaseName = "Viêm mũi họng cấp tính (Cảm lạnh)", chapterName = "Bệnh hệ hô hấp", isCommon = true, specialtyId = 1, isPreferred = specialtyId == 1 },
+                    new { icdCode = "J02", diseaseName = "Viêm họng cấp", chapterName = "Bệnh hệ hô hấp", isCommon = true, specialtyId = 1, isPreferred = specialtyId == 1 },
+                    new { icdCode = "J03", diseaseName = "Viêm amiđan cấp", chapterName = "Bệnh hệ hô hấp", isCommon = true, specialtyId = 1, isPreferred = specialtyId == 1 },
+                    new { icdCode = "J20", diseaseName = "Viêm phế quản cấp", chapterName = "Bệnh hệ hô hấp", isCommon = true, specialtyId = 1, isPreferred = specialtyId == 1 },
+                    new { icdCode = "J01", diseaseName = "Viêm xoang cấp", chapterName = "Bệnh hệ hô hấp", isCommon = true, specialtyId = 1, isPreferred = specialtyId == 1 },
+                    new { icdCode = "J45", diseaseName = "Hen phế quản (Suyễn)", chapterName = "Bệnh hệ hô hấp", isCommon = true, specialtyId = 1, isPreferred = specialtyId == 1 },
 
-                    // Tim máº¡ch / Ná»™i tá»•ng quÃ¡t (SpecialtyId = 2)
-                    new { icdCode = "I10", diseaseName = "TÄƒng huyáº¿t Ã¡p vÃ´ cÄƒn (nguyÃªn phÃ¡t)", chapterName = "Bá»‡nh há»‡ tuáº§n hoÃ n", isCommon = true, specialtyId = 2, isPreferred = specialtyId == 2 },
-                    new { icdCode = "E11", diseaseName = "ÄÃ¡i thÃ¡o Ä‘Æ°á»ng Type 2", chapterName = "Bá»‡nh ná»™i tiáº¿t, chuyá»ƒn hÃ³a", isCommon = true, specialtyId = 2, isPreferred = specialtyId == 2 },
-                    new { icdCode = "E78", diseaseName = "Rá»‘i loáº¡n chuyá»ƒn hÃ³a lipoprotein (Má»¡ mÃ¡u)", chapterName = "Bá»‡nh ná»™i tiáº¿t, chuyá»ƒn hÃ³a", isCommon = true, specialtyId = 2, isPreferred = specialtyId == 2 },
+                    // Tim mạch / Nội tổng quát (SpecialtyId = 2)
+                    new { icdCode = "I10", diseaseName = "Tăng huyết áp vô căn (nguyên phát)", chapterName = "Bệnh hệ tuần hoàn", isCommon = true, specialtyId = 2, isPreferred = specialtyId == 2 },
+                    new { icdCode = "E11", diseaseName = "Đái tháo đường Type 2", chapterName = "Bệnh nội tiết, chuyển hóa", isCommon = true, specialtyId = 2, isPreferred = specialtyId == 2 },
+                    new { icdCode = "E78", diseaseName = "Rối loạn chuyển hóa lipoprotein (Mỡ máu)", chapterName = "Bệnh nội tiết, chuyển hóa", isCommon = true, specialtyId = 2, isPreferred = specialtyId == 2 },
                     
-                    // TiÃªu hÃ³a (SpecialtyId = 3)
-                    new { icdCode = "K21", diseaseName = "TrÃ o ngÆ°á»£c dáº¡ dÃ y - thá»±c quáº£n (GERD)", chapterName = "Bá»‡nh há»‡ tiÃªu hÃ³a", isCommon = true, specialtyId = 3, isPreferred = specialtyId == 3 },
-                    new { icdCode = "K29", diseaseName = "ViÃªm dáº¡ dÃ y vÃ  tÃ¡ trÃ ng", chapterName = "Bá»‡nh há»‡ tiÃªu hÃ³a", isCommon = true, specialtyId = 3, isPreferred = specialtyId == 3 },
-                    new { icdCode = "K58", diseaseName = "Há»™i chá»©ng ruá»™t kÃ­ch thÃ­ch (IBS)", chapterName = "Bá»‡nh há»‡ tiÃªu hÃ³a", isCommon = true, specialtyId = 3, isPreferred = specialtyId == 3 },
+                    // Tiêu hóa (SpecialtyId = 3)
+                    new { icdCode = "K21", diseaseName = "Trào ngược dạ dày - thực quản (GERD)", chapterName = "Bệnh hệ tiêu hóa", isCommon = true, specialtyId = 3, isPreferred = specialtyId == 3 },
+                    new { icdCode = "K29", diseaseName = "Viêm dạ dày và tá tràng", chapterName = "Bệnh hệ tiêu hóa", isCommon = true, specialtyId = 3, isPreferred = specialtyId == 3 },
+                    new { icdCode = "K58", diseaseName = "Hội chứng ruột kích thích (IBS)", chapterName = "Bệnh hệ tiêu hóa", isCommon = true, specialtyId = 3, isPreferred = specialtyId == 3 },
 
-                    // CÆ¡ xÆ°Æ¡ng khá»›p (SpecialtyId = 5)
-                    new { icdCode = "M54.5", diseaseName = "Äau lÆ°ng dÆ°á»›i (Tháº¯t lÆ°ng)", chapterName = "Bá»‡nh há»‡ cÆ¡ xÆ°Æ¡ng khá»›p", isCommon = true, specialtyId = 5, isPreferred = specialtyId == 5 },
-                    new { icdCode = "M17", diseaseName = "ThoÃ¡i hÃ³a khá»›p gá»‘i", chapterName = "Bá»‡nh há»‡ cÆ¡ xÆ°Æ¡ng khá»›p", isCommon = true, specialtyId = 5, isPreferred = specialtyId == 5 },
-                    new { icdCode = "M10", diseaseName = "Bá»‡nh GÃºt (Gout)", chapterName = "Bá»‡nh há»‡ cÆ¡ xÆ°Æ¡ng khá»›p", isCommon = true, specialtyId = 5, isPreferred = specialtyId == 5 },
+                    // Cơ xương khớp (SpecialtyId = 5)
+                    new { icdCode = "M54.5", diseaseName = "Đau lưng dưới (Thắt lưng)", chapterName = "Bệnh hệ cơ xương khớp", isCommon = true, specialtyId = 5, isPreferred = specialtyId == 5 },
+                    new { icdCode = "M17", diseaseName = "Thoái hóa khớp gối", chapterName = "Bệnh hệ cơ xương khớp", isCommon = true, specialtyId = 5, isPreferred = specialtyId == 5 },
+                    new { icdCode = "M10", diseaseName = "Bệnh Gút (Gout)", chapterName = "Bệnh hệ cơ xương khớp", isCommon = true, specialtyId = 5, isPreferred = specialtyId == 5 },
 
-                    // Triá»‡u chá»©ng chung
-                    new { icdCode = "R50", diseaseName = "Sá»‘t khÃ´ng rÃµ nguyÃªn nhÃ¢n", chapterName = "Triá»‡u chá»©ng chung", isCommon = true, specialtyId = (int?)null, isPreferred = false },
-                    new { icdCode = "R51", diseaseName = "Äau Ä‘áº§u", chapterName = "Triá»‡u chá»©ng chung", isCommon = true, specialtyId = (int?)null, isPreferred = false },
-                    new { icdCode = "R10", diseaseName = "Äau bá»¥ng vÃ  vÃ¹ng cháº­u", chapterName = "Triá»‡u chá»©ng chung", isCommon = true, specialtyId = (int?)null, isPreferred = false }
+                    // Triệu chứng chung
+                    new { icdCode = "R50", diseaseName = "Sốt không rõ nguyên nhân", chapterName = "Triệu chứng chung", isCommon = true, specialtyId = (int?)null, isPreferred = false },
+                    new { icdCode = "R51", diseaseName = "Đau đầu", chapterName = "Triệu chứng chung", isCommon = true, specialtyId = (int?)null, isPreferred = false },
+                    new { icdCode = "R10", diseaseName = "Đau bụng và vùng chậu", chapterName = "Triệu chứng chung", isCommon = true, specialtyId = (int?)null, isPreferred = false }
                 };
 
                 if (!string.IsNullOrWhiteSpace(search))
@@ -1204,11 +1189,11 @@ namespace DTT_Backend_API.Controllers
     {
         public int MedicineId { get; set; }
         public string MedicineName { get; set; } = string.Empty;
-        public string Unit { get; set; } = "ViÃªn";
+        public string Unit { get; set; } = "Viên";
         public int Quantity { get; set; } = 10;
         public string Dosage { get; set; } = "500mg";
         public string Frequency { get; set; } = "2 lần/ngày";
-        public string UsageInstruction { get; set; } = "Uá»‘ng sau Äƒn 30 phÃºt";
+        public string UsageInstruction { get; set; } = "Uống sau ăn 30 phút";
     }
 
     public class DispenseDto

@@ -4,13 +4,13 @@ using Microsoft.EntityFrameworkCore;
 using DTT_Backend_API.Data;
 using DTT_Backend_API.Models;
 using DTT_Backend_API.DTOs;
+using DTT_Backend_API.Helpers;
 using System.Data;
 using System.Data.Common;
 
 namespace DTT_Backend_API.Controllers;
 
 [ApiController]
-[AllowAnonymous]
 [Route("api/work-schedules")]
 [Route("api/doctor-schedules")]
 public class WorkSchedulesController : ControllerBase
@@ -259,7 +259,10 @@ public class WorkSchedulesController : ControllerBase
     }
 
     // ── POST /api/work-schedules (Tạo mới Lịch làm của bác sĩ) ───────────────
+    // Chỉ nhân viên y tế (Web Admin) được tạo/sửa lịch làm việc của Bác sĩ — bệnh nhân
+    // (role_id=3) tuyệt đối không được ghi đè lịch trực của người khác.
     [HttpPost]
+    [StaffOnly]
     public async Task<IActionResult> CreateSchedule([FromBody] CreateWorkScheduleDto dto)
     {
         if (!ModelState.IsValid) return BadRequest(ModelState);
@@ -336,6 +339,7 @@ public class WorkSchedulesController : ControllerBase
 
     // ── PUT /api/work-schedules/{id} (Cập nhật Lịch làm của bác sĩ) ───────────
     [HttpPut("{id}")]
+    [StaffOnly]
     public async Task<IActionResult> UpdateSchedule(int id, [FromBody] UpdateWorkScheduleDto dto)
     {
         try
@@ -495,6 +499,7 @@ public class WorkSchedulesController : ControllerBase
     // ── PUT /api/work-schedules/{id}/toggle-lock (Khóa / Mở khóa ca trực) ─────
     [HttpPut("{id}/toggle-lock")]
     [HttpPut("{id}/lock")]
+    [StaffOnly]
     public async Task<IActionResult> ToggleLockSchedule(int id, [FromBody] ToggleLockScheduleDto? dto = null)
     {
         try
@@ -563,6 +568,7 @@ public class WorkSchedulesController : ControllerBase
     // ── PUT /api/work-schedules/{id}/cancel (Hủy ca trực — CHỈ HỦY, KHÔNG XÓA ROW) ──────
     [HttpPut("{id}/cancel")]
     [HttpDelete("{id}")]
+    [StaffOnly]
     public async Task<IActionResult> CancelSchedule(int id)
     {
         try

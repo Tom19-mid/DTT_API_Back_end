@@ -704,6 +704,13 @@ public class DoctorsController : ControllerBase
         var scheduleByDoctor = new Dictionary<int, int>(); // doctorId -> schedule_id
         var scheduleStatus = new Dictionary<int, string>(); // schedule_id -> status
         var slotsBySchedule = new Dictionary<int, List<string>>(); // schedule_id -> ["HH:mm - HH:mm", ...]
+        // Một bác sĩ có thể có NHIỀU dòng doctor_schedules trong cùng 1 work_date (ca sáng + ca chiều,
+        // có khoảng nghỉ trưa ở giữa — đã xác nhận qua khảo sát dữ liệu thật). Gộp lại thành khoảng
+        // "sớm nhất -> muộn nhất" cho mỗi bác sĩ để lọc theo giờ hiện tại (chấp nhận đánh đổi: giờ nghỉ
+        // trưa nằm trong khoảng này vẫn tính là "đang trong ca", đủ để chặn trường hợp báo lỗi gốc —
+        // bác sĩ chỉ trực buổi sáng nhưng buổi tối vẫn hiện trong danh sách).
+        var doctorShiftStart = new Dictionary<int, TimeSpan>(); // doctorId -> earliest start_time
+        var doctorShiftEnd = new Dictionary<int, TimeSpan>(); // doctorId -> latest end_time
 
         if (doctorIds.Count > 0)
         {
@@ -715,7 +722,7 @@ public class DoctorsController : ControllerBase
             using (var cmd = conn.CreateCommand())
             {
                 cmd.CommandText = $@"
-                    SELECT schedule_id, doctor_id, status
+                    SELECT schedule_id, doctor_id, status, start_time, end_time
                     FROM doctor_schedules
                     WHERE doctor_id IN ({idsStr}) AND work_date = @wDate";
                 var p = cmd.CreateParameter(); p.ParameterName = "@wDate"; p.Value = targetDate.Date; cmd.Parameters.Add(p);
@@ -728,6 +735,16 @@ public class DoctorsController : ControllerBase
                     scheduleByDoctor[docId] = schId;
                     scheduleStatus[schId] = status;
                     scheduleIds.Add(schId);
+
+                    if (!reader.IsDBNull(3) && !reader.IsDBNull(4))
+                    {
+                        TimeSpan rowStart = GetTimeSpanValue(reader, 3);
+                        TimeSpan rowEnd = GetTimeSpanValue(reader, 4);
+                        if (!doctorShiftStart.TryGetValue(docId, out var curStart) || rowStart < curStart)
+                            doctorShiftStart[docId] = rowStart;
+                        if (!doctorShiftEnd.TryGetValue(docId, out var curEnd) || rowEnd > curEnd)
+                            doctorShiftEnd[docId] = rowEnd;
+                    }
                 }
             }
 
@@ -768,6 +785,16 @@ public class DoctorsController : ControllerBase
                 shiftDescription = timeSlots.Length > 0 ? "Đang nhận lịch khám" : "Đã kín lịch khám";
             }
 
+            string shiftStartTime = "";
+            string shiftEndTime = "";
+            if (isWorking)
+            {
+                if (doctorShiftStart.TryGetValue(doc.DoctorId, out var sTime))
+                    shiftStartTime = $"{sTime.Hours:D2}:{sTime.Minutes:D2}";
+                if (doctorShiftEnd.TryGetValue(doc.DoctorId, out var eTime))
+                    shiftEndTime = $"{eTime.Hours:D2}:{eTime.Minutes:D2}";
+            }
+
             list.Add(new
             {
                 doc.DoctorId,
@@ -779,7 +806,9 @@ public class DoctorsController : ControllerBase
                 DayOfWeek = GetVietnameseDayName(targetDate.DayOfWeek),
                 IsWorking = isWorking,
                 StatusText = shiftDescription,
-                TimeSlots = timeSlots
+                TimeSlots = timeSlots,
+                ShiftStartTime = shiftStartTime,
+                ShiftEndTime = shiftEndTime
             });
         }
 

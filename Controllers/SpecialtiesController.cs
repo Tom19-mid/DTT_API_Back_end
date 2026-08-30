@@ -1,6 +1,7 @@
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using DTT_Backend_API.Data;
+using DTT_Backend_API.Helpers;
 using DTT_Backend_API.Models;
 using System.ComponentModel.DataAnnotations;
 
@@ -169,6 +170,7 @@ public class SpecialtiesController : ControllerBase
     [HttpPost]
     public async Task<IActionResult> CreateSpecialty([FromBody] CreateSpecialtyDto dto)
     {
+        if (!AccessControl.IsStaff(User)) return this.ForbidJson();
         try
         {
             if (string.IsNullOrWhiteSpace(dto.SpecialtyName))
@@ -220,6 +222,7 @@ public class SpecialtiesController : ControllerBase
     [HttpPut("{id}")]
     public async Task<IActionResult> UpdateSpecialty(int id, [FromBody] UpdateSpecialtyDto dto)
     {
+        if (!AccessControl.IsStaff(User)) return this.ForbidJson();
         try
         {
             var specialty = await _context.Specialties.FirstOrDefaultAsync(s => s.SpecialtyId == id);
@@ -273,6 +276,7 @@ public class SpecialtiesController : ControllerBase
     [HttpPut("{id}/status")]
     public async Task<IActionResult> UpdateSpecialtyStatus(int id, [FromBody] UpdateSpecialtyStatusDto dto)
     {
+        if (!AccessControl.IsStaff(User)) return this.ForbidJson();
         try
         {
             var specialty = await _context.Specialties.FirstOrDefaultAsync(s => s.SpecialtyId == id);
@@ -302,6 +306,7 @@ public class SpecialtiesController : ControllerBase
     [HttpDelete("{id}")]
     public async Task<IActionResult> DeleteSpecialty(int id)
     {
+        if (!AccessControl.IsStaff(User)) return this.ForbidJson();
         try
         {
             var specialty = await _context.Specialties.FirstOrDefaultAsync(s => s.SpecialtyId == id);

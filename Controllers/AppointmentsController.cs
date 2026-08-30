@@ -277,8 +277,10 @@ public class AppointmentsController : ControllerBase
         }
         catch (Exception ex)
         {
+            // Trước đây trả về Ok([]) giả khi có lỗi thật (DB lỗi, timeout...) — bệnh nhân tưởng mình
+            // chưa từng có lịch hẹn nào trong khi thực chất hệ thống đang gặp sự cố. Phải báo lỗi thật.
             Console.WriteLine("GetPatientAppointments error: " + ex.Message);
-            return Ok(new List<AppointmentResponseDto>());
+            return StatusCode(500, new { success = false, message = "Lỗi khi tải danh sách lịch hẹn: " + ex.Message });
         }
     }
 
@@ -334,8 +336,10 @@ public class AppointmentsController : ControllerBase
         }
         catch (Exception ex)
         {
+            // Trước đây trả về Ok([]) giả khi có lỗi thật — màn hàng đợi Lễ Tân/Bác sĩ hiện "không có
+            // lịch hẹn nào" giống hệt trường hợp thật sự trống, che mất sự cố DB/server thật sự.
             Console.WriteLine("GetAllAppointments error: " + ex.Message);
-            return Ok(new List<AppointmentResponseDto>());
+            return StatusCode(500, new { success = false, message = "Lỗi khi tải danh sách lịch hẹn: " + ex.Message });
         }
     }
 

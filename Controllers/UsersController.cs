@@ -49,8 +49,11 @@ public class UsersController : ControllerBase
         return "Active";
     }
 
-    // GET /api/users — Lấy danh sách tất cả tài khoản
+    // GET /api/users — Lấy danh sách tất cả tài khoản (chứa PII: SĐT/Email của MỌI người dùng)
+    // Chỉ nhân viên y tế (Web Admin) được liệt kê toàn bộ tài khoản — bệnh nhân tuyệt đối
+    // không được xem thông tin liên hệ của người dùng khác.
     [HttpGet]
+    [StaffOnly]
     public async Task<IActionResult> GetAllUsers([FromQuery] int? roleId, [FromQuery] string? status, [FromQuery] string? search)
     {
         try
@@ -144,6 +147,7 @@ public class UsersController : ControllerBase
 
     // GET /api/users/{id} — Lấy thông tin tài khoản chi tiết theo UserId
     [HttpGet("{id}")]
+    [StaffOnly]
     public async Task<IActionResult> GetUserById(Guid id)
     {
         try
@@ -186,7 +190,12 @@ public class UsersController : ControllerBase
     }
 
     // POST /api/users — Tạo mới tài khoản người dùng
+    // Chỉ nhân viên y tế (Web Admin) được gọi endpoint này — cho phép chỉ định RoleId bất kỳ
+    // (kể cả Admin) nên nếu để bệnh nhân gọi được sẽ là lỗ hổng leo thang đặc quyền nghiêm
+    // trọng. Bệnh nhân tự đăng ký tài khoản qua AuthController.Register (/auth/register),
+    // KHÔNG BAO GIỜ qua endpoint này.
     [HttpPost]
+    [StaffOnly]
     public async Task<IActionResult> CreateUser([FromBody] CreateUserDto dto)
     {
         if (!ModelState.IsValid) return BadRequest(ModelState);
@@ -291,8 +300,10 @@ public class UsersController : ControllerBase
         }
     }
 
-    // PUT /api/users/{id} — Cập nhật thông tin tài khoản
+    // PUT /api/users/{id} — Cập nhật thông tin tài khoản (bao gồm đổi RoleId) — chỉ nhân viên,
+    // vì trước đây bất kỳ ai đăng nhập cũng gọi được, kể cả tự đổi RoleId của chính mình lên Admin.
     [HttpPut("{id}")]
+    [StaffOnly]
     public async Task<IActionResult> UpdateUser(Guid id, [FromBody] UpdateUserDto dto)
     {
         try
@@ -432,6 +443,7 @@ public class UsersController : ControllerBase
 
     // PUT /api/users/{id}/status — Khóa / Kích hoạt tài khoản
     [HttpPut("{id}/status")]
+    [StaffOnly]
     public async Task<IActionResult> UpdateUserStatus(Guid id, [FromBody] UpdateUserStatusDto dto)
     {
         try
