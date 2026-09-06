@@ -4,6 +4,7 @@ using DTT_Backend_API.Data;
 using DTT_Backend_API.Helpers;
 using DTT_Backend_API.Models;
 using System.Globalization;
+using System.Security.Claims;
 
 namespace DTT_Backend_API.Controllers;
 
@@ -16,6 +17,14 @@ public class FamilyMembersController : ControllerBase
     public FamilyMembersController(AppDbContext context)
     {
         _context = context;
+    }
+
+    // Trả về user_id thật của nhân viên đang đăng nhập (từ JWT), thay vì đoán đại một tài khoản
+    // lễ tân bất kỳ trong DB hay dùng GUID cố định khi không tìm thấy.
+    private Guid? GetCurrentStaffUserId()
+    {
+        var claim = User.FindFirst(ClaimTypes.NameIdentifier)?.Value;
+        return Guid.TryParse(claim, out var id) ? id : (Guid?)null;
     }
 
     // GET /api/familymembers/patient/{patientId}
@@ -106,8 +115,9 @@ public class FamilyMembersController : ControllerBase
                 else if (v == "từ chối" || v == "rejected") verStatus = "rejected";
             }
 
-            var receptionistUser = await _context.Users.FirstOrDefaultAsync(u => u.RoleId == 4 || u.Email == "letan.minhchau@gmail.com");
-            Guid currentUserId = receptionistUser?.UserId ?? Guid.Parse("ddb25ca6-80c8-434d-a05a-d4231c25e95b");
+            Guid? currentUserId = GetCurrentStaffUserId();
+            if (verStatus == "verified" && currentUserId == null)
+                return BadRequest(new { success = false, message = "Không xác định được nhân viên thực hiện duyệt hồ sơ." });
 
             var member = new FamilyMember
             {
@@ -233,8 +243,10 @@ public class FamilyMembersController : ControllerBase
                         if (!member.VerifiedAt.HasValue) member.VerifiedAt = DateTime.UtcNow;
                         if (!member.VerifiedBy.HasValue)
                         {
-                            var receptionistUser = await _context.Users.FirstOrDefaultAsync(u => u.RoleId == 4 || u.Email == "letan.minhchau@gmail.com");
-                            member.VerifiedBy = receptionistUser?.UserId ?? Guid.Parse("ddb25ca6-80c8-434d-a05a-d4231c25e95b");
+                            var staffId = GetCurrentStaffUserId();
+                            if (staffId == null)
+                                return BadRequest(new { success = false, message = "Không xác định được nhân viên thực hiện duyệt hồ sơ." });
+                            member.VerifiedBy = staffId;
                         }
                     }
                     else if (v == "từ chối" || v == "rejected")
@@ -277,8 +289,10 @@ public class FamilyMembersController : ControllerBase
             if (string.IsNullOrWhiteSpace(dto.CccdNumber))
                 return BadRequest(new { success = false, message = "Vui lòng nhập số CCCD." });
 
-            var receptionistUser = await _context.Users.FirstOrDefaultAsync(u => u.RoleId == 4 || u.Email == "letan.minhchau@gmail.com");
-            Guid currentUserId = receptionistUser?.UserId ?? Guid.Parse("ddb25ca6-80c8-434d-a05a-d4231c25e95b");
+            var staffId = GetCurrentStaffUserId();
+            if (staffId == null)
+                return BadRequest(new { success = false, message = "Không xác định được nhân viên thực hiện duyệt hồ sơ." });
+            Guid currentUserId = staffId.Value;
 
             member.CccdNumber = dto.CccdNumber;
             member.VerificationStatus = "verified";
@@ -318,6 +332,57 @@ public class FamilyMembersController : ControllerBase
         {
             var msg = ex.InnerException != null ? ex.InnerException.Message : ex.Message;
             return StatusCode(500, new { success = false, message = "Lỗi xác thực: " + msg });
+        }
+    }
+
+    // PATCH /api/familymembers/{id}/reject — Lễ Tân/Admin từ chối hồ sơ người thân
+    // (CCCD không khớp, thông tin không hợp lệ...) — trước đây chỉ có thể "từ chối" gián tiếp
+    // qua form Sửa chung, không có hành động riêng biệt như /verify.
+    [HttpPatch("{id}/reject")]
+    public async Task<IActionResult> RejectFamilyMember(int id, [FromBody] RejectFamilyMemberDto dto)
+    {
+        if (!AccessControl.IsStaff(User)) return this.ForbidJson();
+        try
+        {
+            var member = await _context.FamilyMembers.FirstOrDefaultAsync(m => m.MemberId == id);
+            if (member == null) return NotFound(new { success = false, message = "Không tìm thấy hồ sơ người thân." });
+
+            var staffId = GetCurrentStaffUserId();
+            if (staffId == null)
+                return BadRequest(new { success = false, message = "Không xác định được nhân viên thực hiện từ chối hồ sơ." });
+
+            member.VerificationStatus = "rejected";
+            member.VerifiedBy = staffId;
+            member.VerifiedAt = DateTime.UtcNow;
+            member.VerificationNote = string.IsNullOrWhiteSpace(dto.Reason)
+                ? $"Từ chối hồ sơ lúc: {DateTime.UtcNow:dd/MM/yyyy HH:mm}"
+                : $"Từ chối: {dto.Reason} (lúc {DateTime.UtcNow:dd/MM/yyyy HH:mm})";
+            member.UpdatedAt = DateTime.UtcNow;
+
+            await _context.SaveChangesAsync();
+
+            var owner = await _context.Patients.FirstOrDefaultAsync(p => p.PatientId == member.OwnerPatientId);
+            if (owner != null && owner.UserId != Guid.Empty)
+            {
+                _context.Notifications.Add(new Notification
+                {
+                    UserId = owner.UserId,
+                    Title = "❌ Hồ Sơ Người Thân Bị Từ Chối Xác Thực",
+                    Content = $"Hồ sơ người thân '{member.FullName}' ({member.Relationship}) trong tài khoản của bạn đã bị Lễ Tân từ chối xác thực." +
+                              (string.IsNullOrWhiteSpace(dto.Reason) ? "" : $" Lý do: {dto.Reason}"),
+                    Type = "system",
+                    IsRead = false,
+                    CreatedAt = DateTime.UtcNow
+                });
+                await _context.SaveChangesAsync();
+            }
+
+            return Ok(new { success = true, message = "Đã từ chối hồ sơ người thân.", memberId = id, verificationStatus = "rejected" });
+        }
+        catch (Exception ex)
+        {
+            var msg = ex.InnerException != null ? ex.InnerException.Message : ex.Message;
+            return StatusCode(500, new { success = false, message = "Lỗi từ chối hồ sơ: " + msg });
         }
     }
 
@@ -404,6 +469,11 @@ public class CreateFamilyMemberDto
     public string? Address { get; set; }
     public string? VerificationStatus { get; set; }
     public string? VerificationNote { get; set; }
+}
+
+public class RejectFamilyMemberDto
+{
+    public string? Reason { get; set; }
 }
 
 public class UpdateFamilyMemberDto

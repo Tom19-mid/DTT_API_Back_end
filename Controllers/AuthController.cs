@@ -2,6 +2,7 @@ using System.IdentityModel.Tokens.Jwt;
 using System.Security.Claims;
 using System.Text;
 using Microsoft.AspNetCore.Authorization;
+using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.IdentityModel.Tokens;
@@ -19,11 +20,13 @@ public class AuthController : ControllerBase
 {
     private readonly AppDbContext _context;
     private readonly IConfiguration _config;
+    private readonly IWebHostEnvironment _env;
 
-    public AuthController(AppDbContext context, IConfiguration config)
+    public AuthController(AppDbContext context, IConfiguration config, IWebHostEnvironment env)
     {
         _context = context;
         _config = config;
+        _env = env;
     }
 
     [AllowAnonymous]
@@ -350,7 +353,9 @@ public class AuthController : ControllerBase
             Phone = user.PhoneNumber,
             Email = user.Email,
             VerificationStatus = patient.VerificationStatus,
-            OtpCode = otp
+            // Chỉ trả mã OTP thật trong response ở môi trường Development (demo đồ án, tránh tốn phí SMS thật).
+            // Ở Production, mã chỉ còn hiện trong console log server — không lộ qua API cho client.
+            OtpCode = _env.IsDevelopment() ? otp : null
         });
     }
 
@@ -411,12 +416,13 @@ public class AuthController : ControllerBase
         Console.WriteLine("╚═════════════════════════════════════════════════════════════════════╝\n");
 
         // In production: integrate SMS gateway (Twilio, ESMS.vn, etc.)
-        // For now: return OTP in response body (dev/demo mode only)
+        // Demo đồ án: chỉ trả mã OTP trong response khi chạy ở Development, tránh tốn phí SMS thật.
+        // Ở Production, mã chỉ còn hiện trong console log server phía trên — không lộ qua API cho client.
         return Ok(new
         {
             success = true,
             message = $"Mã OTP đã được gửi đến số {user.PhoneNumber}.",
-            otpCode = otp,
+            otpCode = _env.IsDevelopment() ? otp : null,
             expiresInSeconds = 300
         });
     }

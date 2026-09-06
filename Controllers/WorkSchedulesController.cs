@@ -71,10 +71,7 @@ public class WorkSchedulesController : ControllerBase
             }
 
             if (!string.IsNullOrEmpty(search))
-            {
-                var lowerSearch = search.Trim().ToLower().Replace("'", "''");
-                sql += $" AND (LOWER(d.full_name) LIKE '%{lowerSearch}%' OR LOWER(s.specialty_name) LIKE '%{lowerSearch}%')";
-            }
+                sql += " AND (LOWER(d.full_name) LIKE LOWER(@search) OR LOWER(s.specialty_name) LIKE LOWER(@search))";
 
             sql += " ORDER BY ds.schedule_id ASC";
 
@@ -85,6 +82,13 @@ public class WorkSchedulesController : ControllerBase
             using (var cmd = conn.CreateCommand())
             {
                 cmd.CommandText = sql;
+                if (!string.IsNullOrEmpty(search))
+                {
+                    var pSearch = cmd.CreateParameter();
+                    pSearch.ParameterName = "@search";
+                    pSearch.Value = $"%{search.Trim()}%";
+                    cmd.Parameters.Add(pSearch);
+                }
                 using var reader = await cmd.ExecuteReaderAsync();
                 while (await reader.ReadAsync())
                 {

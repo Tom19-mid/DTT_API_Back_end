@@ -174,7 +174,11 @@ public class AppointmentsController : ControllerBase
             if (slotId <= 0)
                 return BadRequest(new { success = false, message = "Khung giờ đã chọn không còn khả dụng hoặc nằm ngoài giờ làm việc của bác sĩ ngày hôm đó. Vui lòng chọn khung giờ khác." });
 
-            int queueNum = (await _context.Appointments.CountAsync(a => a.PatientId == validPatientId)) + 1;
+            // Số thứ tự hàng đợi phải tính theo hàng đợi THẬT của bác sĩ trong ngày khám đó
+            // (giống cách lễ tân tính khi check-in), KHÔNG phải tổng số lịch hẹn lịch sử của bệnh nhân.
+            int queueNum = (await _context.Appointments.CountAsync(a =>
+                a.DoctorId == validDoctorId && a.AppointmentDate == apptDate &&
+                a.StatusId != 5 && a.StatusId != 6)) + 1; // loại Cancelled(5)/NoShow(6)
             int newAppointmentId = 0;
 
             // 5. Try standard EF Save, if trigger fails run Raw SQL insert

@@ -247,7 +247,11 @@ public class HealthPackagesController : ControllerBase
                 return BadRequest(new { success = false, message = "Không thể khởi tạo khung giờ khám cho gói dịch vụ." });
 
             // 6. Create appointment record
-            int queueNum = (await _context.Appointments.CountAsync(a => a.PatientId == validPatientId)) + 1;
+            // Số thứ tự hàng đợi phải tính theo hàng đợi THẬT của bác sĩ trong ngày khám đó
+            // (giống cách lễ tân tính khi check-in), KHÔNG phải tổng số lịch hẹn lịch sử của bệnh nhân.
+            int queueNum = (await _context.Appointments.CountAsync(a =>
+                a.DoctorId == validDoctorId && a.AppointmentDate == apptDateForPackage &&
+                a.StatusId != 5 && a.StatusId != 6)) + 1; // loại Cancelled(5)/NoShow(6)
             int newAppointmentId = 0;
 
             string timeSlotSuffix = !string.IsNullOrWhiteSpace(req.PreferredTimeSlot) ? $" ({req.PreferredTimeSlot})" : "";

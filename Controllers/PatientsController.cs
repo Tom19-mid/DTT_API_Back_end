@@ -636,10 +636,7 @@ public class PatientsController : ControllerBase
 
             Guid? currentUserId = GetCurrentUserId();
             if (!currentUserId.HasValue)
-            {
-                var receptionistUser = await _context.Users.FirstOrDefaultAsync(u => u.RoleId == 4 || u.Email == "letan.minhchau@gmail.com");
-                currentUserId = receptionistUser?.UserId ?? Guid.Parse("ddb25ca6-80c8-434d-a05a-d4231c25e95b");
-            }
+                return BadRequest(new { success = false, message = "Không xác định được nhân viên thực hiện duyệt hồ sơ." });
 
             // 1. Cập nhật CCCD & trạng thái xác thực vào DB
             p.CccdNumber = dto.CccdNumber;

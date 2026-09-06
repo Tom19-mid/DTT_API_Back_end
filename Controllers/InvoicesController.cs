@@ -5,6 +5,7 @@ using DTT_Backend_API.Data;
 using DTT_Backend_API.Helpers;
 using DTT_Backend_API.Models;
 using System.Linq;
+using System.Security.Claims;
 
 namespace DTT_Backend_API.Controllers;
 
@@ -26,6 +27,14 @@ public class InvoicesController : ControllerBase
         _paypalClient = paypalClient;
     }
 
+    // Trả về user_id thật của nhân viên đang đăng nhập (từ JWT), thay vì đoán đại một tài khoản
+    // lễ tân bất kỳ trong DB hay dùng GUID cố định khi không tìm thấy.
+    private Guid? GetCurrentStaffUserId()
+    {
+        var claim = User.FindFirst(ClaimTypes.NameIdentifier)?.Value;
+        return Guid.TryParse(claim, out var id) ? id : (Guid?)null;
+    }
+
     // GET /api/Invoices/estimate/{appointmentId}
     // Trả về phí khám + phí thuốc THẬT tính từ đơn thuốc điện tử (prescription_details x medicines.unit_price)
     // Dùng để hiển thị đúng số tiền trên màn Thanh Toán TRƯỚC khi Lễ Tân bấm xác nhận thu tiền.
@@ -36,6 +45,7 @@ public class InvoicesController : ControllerBase
     {
         var invoice = await _context.Invoices.FirstOrDefaultAsync(i => i.InvoiceId == invoiceId);
         if (invoice == null) return NotFound(new { success = false, message = "Invoice not found" });
+        if (!await AccessControl.CanAccessAppointmentAsync(User, _context, invoice.AppointmentId)) return this.ForbidJson();
         var appt = await _context.Appointments.FirstOrDefaultAsync(a => a.AppointmentId == invoice.AppointmentId);
         if (appt == null) return NotFound(new { success = false, message = "Appt not found" });
 
@@ -400,7 +410,9 @@ public class InvoicesController : ControllerBase
             }
             else
             {
-                var receptionistUser = await _context.Users.FirstOrDefaultAsync(u => u.RoleId == 4 || u.Email == "letan.minhchau@gmail.com");
+                var staffId = GetCurrentStaffUserId();
+                if (staffId == null)
+                    return BadRequest(new { success = false, message = "Không xác định được nhân viên thực hiện đăng ký." });
                 DateTime? dob = null;
                 if (!string.IsNullOrEmpty(dto.DateOfBirth) && DateTime.TryParse(dto.DateOfBirth, out DateTime parsedDob))
                 {
@@ -424,7 +436,7 @@ public class InvoicesController : ControllerBase
                     CccdNumber = dto.CccdNumber,
                     HealthInsuranceNumber = dto.BhytNumber,
                     VerificationStatus = "verified",
-                    VerifiedBy = receptionistUser?.UserId ?? Guid.Parse("ddb25ca6-80c8-434d-a05a-d4231c25e95b"),
+                    VerifiedBy = staffId,
                     VerifiedAt = DateTime.UtcNow,
                     VerificationNote = $"Tạo hồ sơ vãng lai tại Quầy Lễ Tân. Đã đối chiếu CCCD thực tế. Ngày: {DateTime.Now:dd/MM/yyyy HH:mm}",
                     CreatedAt = DateTime.UtcNow,
@@ -799,6 +811,15 @@ public class InvoicesController : ControllerBase
             if (response == null || response.status != "COMPLETED")
             {
                 return BadRequest(new { success = false, message = "Giao dịch PayPal chưa hoàn tất hoặc bị hủy.", status = response?.status });
+            }
+
+            // Chống gian lận: order PayPal này phải được TẠO RA (create-paypal-order) đúng cho appointmentId
+            // đang capture — nếu không, ai đó có thể trả 1$ cho ca khám của chính mình rồi gọi capture
+            // với appointmentId của người khác để đánh dấu hóa đơn (có thể rất lớn) của người khác là "đã thanh toán".
+            var capturedRefId = response.purchase_units?.FirstOrDefault()?.reference_id;
+            if (string.IsNullOrEmpty(capturedRefId) || !capturedRefId.StartsWith($"DTT_APPT_{appointmentId}_", StringComparison.Ordinal))
+            {
+                return BadRequest(new { success = false, message = "Đơn hàng PayPal không khớp với ca khám này." });
             }
 
             // Ghi nhận hóa đơn trong CSDL
