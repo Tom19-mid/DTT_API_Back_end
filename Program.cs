@@ -1,6 +1,7 @@
 using System.Text;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.AspNetCore.Authorization;
+using Microsoft.AspNetCore.HttpOverrides;
 using Microsoft.AspNetCore.ResponseCompression;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.IdentityModel.Tokens;
@@ -85,11 +86,16 @@ builder.Services.AddDbContext<AppDbContext>(options =>
 
 // Gemini API — GeminiService.GetReplyAsync tự set timeout theo Gemini:TimeoutSeconds
 // (xem Tai Lieu/ai_chatbot_roadmap.md mục 5.6), HttpClient chỉ cần dùng chung factory.
-// Ép kết nối qua IPv4 — một số mạng có IPv6 chập chờn/bị chặn khiến SocketsHttpHandler's Happy
-// Eyeballs "thử IPv6 trước" bị treo/rớt kết nối giữa chừng (SocketException khi đọc TLS response),
-// dù IPv4 vẫn thông bình thường (đã kiểm chứng qua curl/PowerShell tới cùng endpoint).
-builder.Services.AddHttpClient<GeminiService>()
-    .ConfigurePrimaryHttpMessageHandler(() => new SocketsHttpHandler
+// Ép kết nối qua IPv4 bằng raw socket — workaround CHỈ áp dụng trên Windows, vì lý do ban đầu
+// là né lỗi mạng IPv6 chập chờn trên máy dev Windows cụ thể (SocketsHttpHandler's Happy Eyeballs
+// "thử IPv6 trước" bị treo/rớt kết nối). Khi deploy lên container Linux (Render/Docker), cách làm
+// socket thủ công này gây Gemini API bị treo/lỗi do không tương thích với hạ tầng mạng/NAT của
+// nền tảng cloud — phát hiện qua test thực tế ngày 2026-09-07, Chat AI trả về fallback "đang bận"
+// dù key/model vẫn đúng. Trên Linux, dùng SocketsHttpHandler mặc định của .NET là đủ và ổn định hơn.
+var geminiHttpClientBuilder = builder.Services.AddHttpClient<GeminiService>();
+if (OperatingSystem.IsWindows())
+{
+    geminiHttpClientBuilder.ConfigurePrimaryHttpMessageHandler(() => new SocketsHttpHandler
     {
         ConnectCallback = async (context, cancellationToken) =>
         {
@@ -110,6 +116,7 @@ builder.Services.AddHttpClient<GeminiService>()
             }
         }
     });
+}
 
 // JWT Authentication
 var jwtSecretKey = builder.Configuration["Jwt:SecretKey"] ?? "DTT_Healthcare_Super_Secret_Key_2026_Graduation_Project";
@@ -169,6 +176,22 @@ builder.Services.AddCors(options =>
 });
 
 var app = builder.Build();
+
+// Khi chạy sau reverse proxy chấm dứt HTTPS (Render, hoặc bất kỳ PaaS nào tương tự),
+// ASP.NET Core tự thấy Request.Scheme là "http" (proxy chuyển tiếp plain HTTP vào container)
+// trừ khi đọc header X-Forwarded-Proto — nếu không, các URL tự sinh (VD: checkoutUrl/qrUrl
+// của PayPal, InvoicesController.GetPaypalInfo) sẽ luôn ra "http://" dù domain thật là HTTPS.
+// Xóa KnownNetworks/KnownProxies (mặc định chỉ tin loopback) vì IP của proxy Render
+// không cố định trước — object initializer "{ }" KHÔNG xóa được các mục mặc định
+// đã có sẵn trong constructor, phải gọi .Clear() tường minh.
+var forwardedHeadersOptions = new ForwardedHeadersOptions
+{
+    ForwardedHeaders = ForwardedHeaders.XForwardedFor | ForwardedHeaders.XForwardedProto
+};
+forwardedHeadersOptions.KnownNetworks.Clear();
+forwardedHeadersOptions.KnownProxies.Clear();
+app.UseForwardedHeaders(forwardedHeadersOptions);
+
 app.UseResponseCompression();
 app.UseSwagger();
 app.UseSwaggerUI(c =>
