@@ -39,6 +39,20 @@ public class AuthController : ControllerBase
         var user = await _context.Users.FirstOrDefaultAsync(u => u.PhoneNumber == dto.Phone || u.PhoneNumber == phone);
         if (user == null)
         {
+            var matchedPatient = await _context.Patients.FirstOrDefaultAsync(p => p.PhoneNumber == dto.Phone || p.PhoneNumber == phone);
+            if (matchedPatient != null)
+            {
+                user = await _context.Users.FirstOrDefaultAsync(u => u.UserId == matchedPatient.UserId);
+                if (user != null && !string.IsNullOrEmpty(phone))
+                {
+                    user.PhoneNumber = phone;
+                    user.UpdatedAt = DateTime.UtcNow;
+                    await _context.SaveChangesAsync();
+                }
+            }
+        }
+        if (user == null)
+        {
             return Unauthorized(new { message = "Số điện thoại hoặc mật khẩu không chính xác." });
         }
         // Verify password with BCrypt — không còn fallback so khớp plaintext, tránh mở lại
@@ -397,6 +411,20 @@ public class AuthController : ControllerBase
 
         var cleanPhone = dto.Phone?.Trim();
         var user = await _context.Users.FirstOrDefaultAsync(u => u.PhoneNumber == dto.Phone || u.PhoneNumber.Trim() == cleanPhone);
+        if (user == null)
+        {
+            var matchedPatient = await _context.Patients.FirstOrDefaultAsync(p => p.PhoneNumber == dto.Phone || p.PhoneNumber == cleanPhone);
+            if (matchedPatient != null)
+            {
+                user = await _context.Users.FirstOrDefaultAsync(u => u.UserId == matchedPatient.UserId);
+                if (user != null && !string.IsNullOrEmpty(cleanPhone))
+                {
+                    user.PhoneNumber = cleanPhone;
+                    user.UpdatedAt = DateTime.UtcNow;
+                    await _context.SaveChangesAsync();
+                }
+            }
+        }
         if (user == null)
             return NotFound(new { success = false, message = "Số điện thoại chưa được đăng ký trong hệ thống." });
 

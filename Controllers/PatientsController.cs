@@ -643,7 +643,7 @@ public class PatientsController : ControllerBase
             p.VerificationStatus = "verified";
             p.VerifiedBy = currentUserId;
             p.VerifiedAt = DateTime.UtcNow;
-            p.VerificationNote = $"Đã đối chiếu thẻ CCCD thực tế tại Quầy Lễ Tân. CCCD: {dto.CccdNumber}. Duyệt lúc: {DateTime.UtcNow:dd/MM/yyyy HH:mm}";
+            p.VerificationNote = $"Đã đối chiếu thẻ CCCD thực tế tại Quầy Lễ Tân. CCCD: {dto.CccdNumber}. Duyệt lúc: {DateTime.UtcNow.AddHours(7):dd/MM/yyyy HH:mm}";
             p.UpdatedAt = DateTime.UtcNow;
 
             await _context.SaveChangesAsync();

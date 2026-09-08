@@ -259,13 +259,18 @@ public class InvoicesController : ControllerBase
             invoice.UpdatedAt = DateTime.UtcNow;
             await _context.SaveChangesAsync();
 
-            // LƯU Ý: KHÔNG đổi appt.StatusId ở đây nữa. Trước đây code gán appt.StatusId = 5 với ý định
-            // đánh dấu "Paid", nhưng trong bảng appointment_statuses thật, status_id=5 nghĩa là "Cancelled"!
-            // Hậu quả: mọi nơi hiển thị (App Mobile, WinForms) đọc appointment status_id=5 sẽ hiểu nhầm
-            // lịch hẹn đã bị HỦY. Đồng thời status_id đó rất dễ bị ghi đè lại (vd: bác sĩ lưu lại bệnh án
-            // sẽ set về 4=Completed), khiến hóa đơn ĐÃ THANH TOÁN bị hiện lại như "chưa thu phí" trên màn
-            // Lễ Tân. Trạng thái thanh toán giờ chỉ cần đọc từ invoices.payment_status (nguồn dữ liệu thật
-            // duy nhất) — xem AppointmentResponseDto.PaymentStatus.
+            // Cập nhật trạng thái cuộc hẹn sau khi thanh toán thành công:
+            // - Nếu ca khám có đơn thuốc nhưng Dược sĩ CHƯA phát thuốc xong -> giữ StatusId = 10 (Chờ phát thuốc)
+            // - Nếu không có đơn thuốc hoặc Dược sĩ ĐÃ phát thuốc xong -> chuyển sang StatusId = 4 (Completed)
+            if (appt != null)
+            {
+                var medRecord = await _context.MedicalRecords.FirstOrDefaultAsync(r => r.AppointmentId == appt.AppointmentId);
+                var rx = medRecord != null ? await _context.Prescriptions.FirstOrDefaultAsync(p => p.MedicalRecordId == medRecord.MedicalRecordId) : null;
+                bool hasPendingRx = rx != null && rx.Status != "Completed" && rx.Status != "Dispensed";
+                appt.StatusId = hasPendingRx ? 10 : 4;
+                appt.UpdatedAt = DateTime.UtcNow;
+                await _context.SaveChangesAsync();
+            }
 
             // 7. Gửi thông báo lên App Mobile của bệnh nhân
             if (patient != null && patient.UserId != Guid.Empty)
@@ -911,6 +916,17 @@ public class InvoicesController : ControllerBase
             invoice.PaymentMethod = "paypal";
             invoice.UpdatedAt = DateTime.UtcNow;
             await _context.SaveChangesAsync();
+
+            // Cập nhật trạng thái cuộc hẹn sau khi thanh toán qua PayPal:
+            if (appt != null)
+            {
+                var medRecord = await _context.MedicalRecords.FirstOrDefaultAsync(r => r.AppointmentId == appt.AppointmentId);
+                var rx = medRecord != null ? await _context.Prescriptions.FirstOrDefaultAsync(p => p.MedicalRecordId == medRecord.MedicalRecordId) : null;
+                bool hasPendingRx = rx != null && rx.Status != "Completed" && rx.Status != "Dispensed";
+                appt.StatusId = hasPendingRx ? 10 : 4;
+                appt.UpdatedAt = DateTime.UtcNow;
+                await _context.SaveChangesAsync();
+            }
 
             // Gửi thông báo tới App Mobile của bệnh nhân
             if (patient != null && patient.UserId != Guid.Empty)

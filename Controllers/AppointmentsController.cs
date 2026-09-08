@@ -19,18 +19,12 @@ public class AppointmentsController : ControllerBase
         _context = context;
     }
 
-    [HttpPost]
-    public async Task<IActionResult> CreateAppointment([FromBody] CreateAppointmentDto dto)
+    private static bool _hasEnsuredStatuses = false;
+    private async Task EnsureStatusesAsync()
     {
-        if (!ModelState.IsValid) return BadRequest(ModelState);
-        if (!await AccessControl.CanAccessPatientAsync(User, _context, dto.PatientId)) return this.ForbidJson();
-
+        if (_hasEnsuredStatuses) return;
         try
         {
-            // 0. Sync PostgreSQL sequence for appointments_appointment_id_seq
-            await SyncSequencesAsync();
-
-            // 1. Ensure appointment_statuses table has entries
             var statusCount = await _context.AppointmentStatuses.CountAsync();
             if (statusCount == 0)
             {
@@ -43,10 +37,43 @@ public class AppointmentsController : ControllerBase
                     new AppointmentStatus { StatusId = 6, StatusName = "NoShow" },
                     new AppointmentStatus { StatusId = 7, StatusName = "CheckedIn" },
                     new AppointmentStatus { StatusId = 8, StatusName = "WaitingForDoctor" },
-                    new AppointmentStatus { StatusId = 10, StatusName = "PendingDispensing" } // Chờ Dược sĩ phát thuốc
+                    new AppointmentStatus { StatusId = 9, StatusName = "AwaitingTestResults" },
+                    new AppointmentStatus { StatusId = 10, StatusName = "PendingDispensing" },
+                    new AppointmentStatus { StatusId = 11, StatusName = "PendingPayment" }
                 );
                 await _context.SaveChangesAsync();
             }
+            else
+            {
+                if (!await _context.AppointmentStatuses.AnyAsync(s => s.StatusId == 10))
+                {
+                    _context.AppointmentStatuses.Add(new AppointmentStatus { StatusId = 10, StatusName = "PendingDispensing" });
+                    await _context.SaveChangesAsync();
+                }
+                if (!await _context.AppointmentStatuses.AnyAsync(s => s.StatusId == 11))
+                {
+                    _context.AppointmentStatuses.Add(new AppointmentStatus { StatusId = 11, StatusName = "PendingPayment" });
+                    await _context.SaveChangesAsync();
+                }
+            }
+            _hasEnsuredStatuses = true;
+        }
+        catch { /* Bỏ qua nếu có xung đột đồng thời */ }
+    }
+
+    [HttpPost]
+    public async Task<IActionResult> CreateAppointment([FromBody] CreateAppointmentDto dto)
+    {
+        if (!ModelState.IsValid) return BadRequest(ModelState);
+        if (!await AccessControl.CanAccessPatientAsync(User, _context, dto.PatientId)) return this.ForbidJson();
+
+        try
+        {
+            // 0. Sync PostgreSQL sequence for appointments_appointment_id_seq
+            await SyncSequencesAsync();
+
+            // 1. Ensure appointment_statuses table has entries
+            await EnsureStatusesAsync();
 
             // 2. Xác thực bệnh nhân tồn tại — KHÔNG fallback về "bệnh nhân đầu tiên trong DB" nếu sai ID.
             // Bệnh nhân tự đặt lịch cho chính mình đã bị chặn ở bước AccessControl phía trên nếu ID sai,
@@ -296,6 +323,7 @@ public class AppointmentsController : ControllerBase
         if (!AccessControl.IsStaff(User)) return this.ForbidJson();
         try
         {
+            await EnsureStatusesAsync();
             /*
             // Code cũ chưa dùng AsNoTracking():
             var query = _context.Appointments.AsQueryable();
@@ -307,7 +335,7 @@ public class AppointmentsController : ControllerBase
                 // Bác sĩ chỉ thấy bệnh nhân đã qua Điều dưỡng đo sinh hiệu (status>=8) trở đi
                 // Workflow: CheckedIn(7)→[Điều dưỡng]→WaitingForDoctor(8)→[Bác sĩ]
                 query = query.Where(a => a.DoctorId == doctorId.Value &&
-                    (a.StatusId == 8 || a.StatusId == 3 || a.StatusId == 4 || a.StatusId == 5 || a.StatusId == 6 || a.StatusId == 10));
+                    (a.StatusId == 8 || a.StatusId == 3 || a.StatusId == 4 || a.StatusId == 5 || a.StatusId == 6 || a.StatusId == 9 || a.StatusId == 10 || a.StatusId == 11));
             }
 
             if (todayOnly == true || date == "today")
@@ -863,6 +891,7 @@ public class AppointmentsController : ControllerBase
             if (appt.StatusId == 6) statusStr = "NoShow";
             else if (appt.StatusId == 5) statusStr = "Cancelled";
             else if (appt.StatusId == 4) statusStr = "Completed";
+            else if (appt.StatusId == 11) statusStr = "PendingPayment"; // Chờ thanh toán viện phí
             else if (appt.StatusId == 10) statusStr = "PendingDispensing"; // BS đã kê đơn → chờ Dược sĩ phát thuốc
             else if (appt.StatusId == 9) statusStr = "AwaitingTestResults"; // BS đã chỉ định CLS → đang ở phòng XN/SA
             else if (appt.StatusId == 3) statusStr = "InProgress";

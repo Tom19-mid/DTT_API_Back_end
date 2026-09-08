@@ -651,7 +651,15 @@ namespace DTT_Backend_API.Controllers
                 {
                     // [Old code]: appt.StatusId = 4; // 4 = Completed
                     // [New code]:
-                    appt.StatusId = (dto.Prescriptions != null && dto.Prescriptions.Count > 0) ? 10 : 4;
+                    if (dto.Prescriptions != null && dto.Prescriptions.Count > 0)
+                    {
+                        appt.StatusId = 10; // Chờ Dược sĩ phát thuốc
+                    }
+                    else
+                    {
+                        var paidInvoice = await _context.Invoices.FirstOrDefaultAsync(i => i.AppointmentId == appt.AppointmentId && i.PaymentStatus == "paid");
+                        appt.StatusId = (paidInvoice != null) ? 4 : 11; // 11 = Chờ thanh toán
+                    }
                     appt.UpdatedAt = DateTime.UtcNow;
                     await _context.SaveChangesAsync();
                 }
@@ -1033,11 +1041,14 @@ namespace DTT_Backend_API.Controllers
                 }
                 rx.UpdatedAt = DateTime.UtcNow;
 
-                // Cập nhật cuộc hẹn sang StatusId = 4 (Completed)
+                // Cập nhật cuộc hẹn sau khi phát thuốc:
+                // - Nếu đã thanh toán (paid) -> chuyển sang StatusId = 4 (Completed)
+                // - Nếu chưa thanh toán -> chuyển sang StatusId = 11 (PendingPayment - Chờ thanh toán)
                 var appt = await _context.Appointments.FirstOrDefaultAsync(a => a.AppointmentId == appointmentId);
                 if (appt != null)
                 {
-                    appt.StatusId = 4; // 4 = Completed
+                    var paidInvoice = await _context.Invoices.FirstOrDefaultAsync(i => i.AppointmentId == appointmentId && i.PaymentStatus == "paid");
+                    appt.StatusId = (paidInvoice != null) ? 4 : 11; // 11 = PendingPayment (Chờ thanh toán)
                     appt.UpdatedAt = DateTime.UtcNow;
                 }
 

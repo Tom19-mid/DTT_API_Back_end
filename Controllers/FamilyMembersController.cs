@@ -207,7 +207,26 @@ public class FamilyMembersController : ControllerBase
 
                 if (!string.IsNullOrWhiteSpace(dto.Name)) owner.FullName = dto.Name.Trim().ToUpper();
                 if (!string.IsNullOrWhiteSpace(dto.Gender)) owner.Gender = dto.Gender;
-                if (!string.IsNullOrWhiteSpace(dto.Phone)) owner.PhoneNumber = dto.Phone;
+                if (!string.IsNullOrWhiteSpace(dto.Phone))
+                {
+                    var cleanPhone = dto.Phone.Trim();
+                    if (cleanPhone != owner.PhoneNumber)
+                    {
+                        var isPhoneTaken = await _context.Users.AnyAsync(u => u.PhoneNumber == cleanPhone && u.UserId != owner.UserId);
+                        if (isPhoneTaken)
+                        {
+                            return BadRequest(new { success = false, message = "Số điện thoại này đã được sử dụng bởi tài khoản khác." });
+                        }
+                    }
+                    owner.PhoneNumber = cleanPhone;
+
+                    var user = await _context.Users.FirstOrDefaultAsync(u => u.UserId == owner.UserId);
+                    if (user != null)
+                    {
+                        user.PhoneNumber = cleanPhone;
+                        user.UpdatedAt = DateTime.UtcNow;
+                    }
+                }
                 if (!string.IsNullOrWhiteSpace(dto.Cccd)) owner.CccdNumber = dto.Cccd;
                 if (!string.IsNullOrWhiteSpace(dto.Bhyt)) owner.HealthInsuranceNumber = dto.Bhyt;
                 if (dto.Address != null) owner.Address = dto.Address;
@@ -298,7 +317,7 @@ public class FamilyMembersController : ControllerBase
             member.VerificationStatus = "verified";
             member.VerifiedBy = currentUserId;
             member.VerifiedAt = DateTime.UtcNow;
-            member.VerificationNote = $"Đã đối chiếu thẻ CCCD thực tế tại Quầy Lễ Tân. CCCD: {dto.CccdNumber}. Duyệt lúc: {DateTime.UtcNow:dd/MM/yyyy HH:mm}";
+            member.VerificationNote = $"Đã đối chiếu thẻ CCCD thực tế tại Quầy Lễ Tân. CCCD: {dto.CccdNumber}. Duyệt lúc: {DateTime.UtcNow.AddHours(7):dd/MM/yyyy HH:mm}";
             member.UpdatedAt = DateTime.UtcNow;
 
             await _context.SaveChangesAsync();
