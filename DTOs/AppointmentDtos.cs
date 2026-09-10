@@ -3,6 +3,9 @@ namespace DTT_Backend_API.DTOs;
 public class CreateAppointmentDto
 {
     public int PatientId { get; set; }
+    /// <summary>Đặt lịch cho hồ sơ người thân (family_members.member_id) thay vì cho chính chủ tài khoản.
+    /// Null/0 = đặt cho chính chủ tài khoản (PatientId ở trên).</summary>
+    public int? MemberId { get; set; }
     public int DoctorId { get; set; }
     public string DoctorName { get; set; } = string.Empty;
     public string SpecialtyName { get; set; } = string.Empty;

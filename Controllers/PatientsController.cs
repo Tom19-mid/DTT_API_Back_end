@@ -266,6 +266,21 @@ public class PatientsController : ControllerBase
             if (!string.IsNullOrEmpty(phone) && phone.Length > 10)
                 return BadRequest(new { success = false, message = "Số điện thoại không được vượt quá 10 chữ số." });
 
+            // Không cho phép 2 hồ sơ bệnh nhân khác nhau dùng CHUNG 1 số CCCD — kiểm tra trước khi tạo/
+            // cập nhật để không âm thầm gán nhầm CCCD của người khác vào hồ sơ đang thao tác. Việc tìm
+            // đúng patient hiện có (nếu edit) diễn ra bên dưới nên ở đây tạm loại trừ theo SĐT đang có
+            // sẵn (patient khớp đúng user theo phone) để không tự chặn nhầm chính hồ sơ đang sửa.
+            var cccdInput = dto.CccdNumber?.Trim();
+            if (!string.IsNullOrEmpty(cccdInput))
+            {
+                var existingPatientBySameCccd = await _context.Patients.FirstOrDefaultAsync(p => p.CccdNumber == cccdInput);
+                bool cccdTakenByOtherPatient = existingPatientBySameCccd != null &&
+                    (string.IsNullOrEmpty(phone) || existingPatientBySameCccd.PhoneNumber != phone);
+                bool cccdTakenByFamilyMember = await _context.FamilyMembers.AnyAsync(m => m.CccdNumber == cccdInput);
+                if (cccdTakenByOtherPatient || cccdTakenByFamilyMember)
+                    return BadRequest(new { success = false, message = "Số CCCD này đã được sử dụng cho một hồ sơ khác trong hệ thống." });
+            }
+
             User? user = null;
             if (!string.IsNullOrEmpty(phone))
             {
@@ -633,6 +648,13 @@ public class PatientsController : ControllerBase
             // bên dưới nếu không chặn sớm.
             if (string.IsNullOrWhiteSpace(dto.CccdNumber))
                 return BadRequest(new { success = false, message = "Vui lòng nhập số CCCD." });
+
+            // Không cho phép đối chiếu CCCD trùng với 1 hồ sơ KHÁC đã tồn tại — Lễ Tân đang đối chiếu
+            // thẻ cứng thật, nên nếu số này đã gắn với hồ sơ khác thì chắc chắn có nhầm lẫn/gian lận.
+            bool cccdTakenByOther = await _context.Patients.AnyAsync(x => x.PatientId != id && x.CccdNumber == dto.CccdNumber)
+                || await _context.FamilyMembers.AnyAsync(m => m.CccdNumber == dto.CccdNumber);
+            if (cccdTakenByOther)
+                return BadRequest(new { success = false, message = "Số CCCD này đã được sử dụng cho một hồ sơ khác trong hệ thống." });
 
             Guid? currentUserId = GetCurrentUserId();
             if (!currentUserId.HasValue)

@@ -107,6 +107,38 @@ public class FamilyMembersController : ControllerBase
             if (string.IsNullOrWhiteSpace(dto.Name))
                 return BadRequest(new { success = false, message = "Họ tên không được để trống." });
 
+            // Chủ tài khoản phải TỰ đã được Lễ tân xác thực CCCD (verified) trước khi được thêm hồ sơ
+            // người thân — chặn trường hợp tài khoản chưa xác minh danh tính vẫn tạo tràn lan hồ sơ
+            // người thân ảo. Hồ sơ người thân vừa tạo vẫn luôn ở trạng thái "pending", tự bản thân
+            // người thân đó vẫn phải đến quầy để được xác thực CCCD riêng (không tự động kế thừa
+            // trạng thái verified của chủ tài khoản).
+            var ownerForGate = await _context.Patients.FirstOrDefaultAsync(p => p.PatientId == dto.OwnerPatientId);
+            if (ownerForGate == null)
+                return BadRequest(new { success = false, message = "Không tìm thấy hồ sơ chủ tài khoản." });
+            if (ownerForGate.VerificationStatus != "verified")
+                return BadRequest(new { success = false, message = "Tài khoản của bạn chưa được xác thực CCCD. Vui lòng mang CCCD đến quầy Lễ Tân xác thực trước khi thêm hồ sơ người thân." });
+
+            // Không cho phép 2 hồ sơ (patients hoặc family_members) khác nhau dùng CHUNG 1 số CCCD —
+            // CCCD là định danh duy nhất của 1 người thật, không thể gán cho 2 hồ sơ khác nhau.
+            if (!string.IsNullOrWhiteSpace(dto.Cccd))
+            {
+                bool cccdTaken = await _context.Patients.AnyAsync(p => p.CccdNumber == dto.Cccd)
+                    || await _context.FamilyMembers.AnyAsync(m => m.CccdNumber == dto.Cccd);
+                if (cccdTaken)
+                    return BadRequest(new { success = false, message = "Số CCCD này đã được sử dụng cho một hồ sơ khác trong hệ thống." });
+            }
+
+            // SĐT được phép trùng với SĐT của CHÍNH chủ tài khoản (người thân thường dùng chung SĐT
+            // với chủ tài khoản do không có SĐT riêng — quy ước đã áp dụng nhất quán ở
+            // PatientsController.GetAllPatients) — chỉ chặn khi trùng với 1 hồ sơ KHÁC không liên quan.
+            if (!string.IsNullOrWhiteSpace(dto.Phone) && dto.Phone != ownerForGate.PhoneNumber)
+            {
+                bool phoneTaken = await _context.Patients.AnyAsync(p => p.PatientId != dto.OwnerPatientId && p.PhoneNumber == dto.Phone)
+                    || await _context.FamilyMembers.AnyAsync(m => m.PhoneNumber == dto.Phone);
+                if (phoneTaken)
+                    return BadRequest(new { success = false, message = "Số điện thoại này đã được sử dụng cho một hồ sơ khác trong hệ thống." });
+            }
+
             string verStatus = "pending";
             if (!string.IsNullOrWhiteSpace(dto.VerificationStatus))
             {
@@ -288,6 +320,13 @@ public class FamilyMembersController : ControllerBase
             // bên dưới nếu không chặn sớm.
             if (string.IsNullOrWhiteSpace(dto.CccdNumber))
                 return BadRequest(new { success = false, message = "Vui lòng nhập số CCCD." });
+
+            // Không cho phép đối chiếu CCCD trùng với 1 hồ sơ KHÁC đã tồn tại — Lễ Tân đang đối chiếu
+            // thẻ cứng thật, nên nếu số này đã gắn với hồ sơ khác thì chắc chắn có nhầm lẫn/gian lận.
+            bool cccdTakenByOther = await _context.Patients.AnyAsync(p => p.CccdNumber == dto.CccdNumber)
+                || await _context.FamilyMembers.AnyAsync(m => m.MemberId != id && m.CccdNumber == dto.CccdNumber);
+            if (cccdTakenByOther)
+                return BadRequest(new { success = false, message = "Số CCCD này đã được sử dụng cho một hồ sơ khác trong hệ thống." });
 
             var staffId = GetCurrentStaffUserId();
             if (staffId == null)

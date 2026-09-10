@@ -681,6 +681,20 @@ public class DoctorsController : ControllerBase
         */
         var doctors = await _context.Doctors.ToListAsync();
 
+        // Ẩn hồ sơ bác sĩ "dữ liệu test" (Admin tự đánh dấu IsTestData=true để QA thử nghiệm, vd
+        // "BS. Điều trị" tự sinh khi 1 tài khoản RoleId=2 đăng nhập WinForms lần đầu chưa có hồ sơ
+        // Doctor thật) khỏi mọi luồng đặt lịch — GetAllDoctors (danh sách bác sĩ theo chuyên khoa) đã
+        // lọc !IsTestData từ trước, nhưng endpoint này (dùng riêng để tra khung giờ khám, gọi bởi cả
+        // Mobile lẫn WinForms khi đặt lịch/đặt khám ngay/đặt tái khám) lại quét thẳng toàn bộ bảng
+        // Doctors không lọc gì — khiến các hồ sơ test này lọt vào danh sách bác sĩ có thể đặt lịch,
+        // hiện xen kẽ với bác sĩ thật ở MỌI chuyên khoa/ngày mà chúng có lịch làm việc. Chỉ Admin (Web
+        // Admin quản lý toàn bộ, kể cả dữ liệu test) mới cần thấy đủ.
+        bool isAdminCallerForSchedules = User.FindFirst("role_id")?.Value == "1";
+        if (!isAdminCallerForSchedules)
+        {
+            doctors = doctors.Where(d => !d.IsTestData).ToList();
+        }
+
         if (doctorId.HasValue && doctorId.Value > 0)
         {
             doctors = doctors.Where(d => d.DoctorId == doctorId.Value).ToList();

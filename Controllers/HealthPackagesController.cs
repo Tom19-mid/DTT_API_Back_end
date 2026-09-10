@@ -137,6 +137,32 @@ public class HealthPackagesController : ControllerBase
                 return BadRequest(new { message = "Không tìm thấy bệnh nhân." });
             int validPatientId = patient.PatientId;
 
+            // 2b. Đặt gói khám cho hồ sơ người thân (giống cơ chế MemberId ở AppointmentsController.
+            // CreateAppointment) — xác thực hồ sơ người thân thực sự thuộc về tài khoản đang gọi.
+            FamilyMember? familyMember = null;
+            if (req.MemberId.HasValue && req.MemberId.Value > 0)
+            {
+                familyMember = await _context.FamilyMembers.FirstOrDefaultAsync(m => m.MemberId == req.MemberId.Value);
+                if (familyMember == null || familyMember.OwnerPatientId != validPatientId)
+                    return BadRequest(new { message = "Hồ sơ người thân không hợp lệ hoặc không thuộc tài khoản này." });
+            }
+            string bookingPatientName = familyMember?.FullName ?? (!string.IsNullOrWhiteSpace(req.PatientName) ? req.PatientName : (patient.FullName ?? "Bệnh nhân"));
+
+            // 2c. Gói khám có thể giới hạn theo giới tính (GenderTarget: "male"/"female"/"all") — trước
+            // đây chỉ dùng để LỌC danh sách hiển thị (GET /api/healthpackages?gender=...), backend không
+            // hề kiểm tra lại khi thật sự ĐẶT gói, nên gọi thẳng API vẫn đặt được gói "Nữ" cho bệnh nhân
+            // Nam (đã xác nhận qua test thật) — không hợp lý về mặt lâm sàng. Kiểm tra theo đúng giới
+            // tính của NGƯỜI ĐƯỢC ĐẶT KHÁM (người thân nếu có memberId, không phải luôn chủ tài khoản).
+            string bookingGender = familyMember?.Gender ?? patient.Gender ?? "";
+            if (!string.IsNullOrEmpty(pkg.GenderTarget) &&
+                !pkg.GenderTarget.Equals("all", StringComparison.OrdinalIgnoreCase) &&
+                !string.IsNullOrEmpty(bookingGender) &&
+                !pkg.GenderTarget.Equals(bookingGender, StringComparison.OrdinalIgnoreCase))
+            {
+                string targetLabel = pkg.GenderTarget.Equals("male", StringComparison.OrdinalIgnoreCase) ? "Nam" : "Nữ";
+                return BadRequest(new { message = $"Gói khám '{pkg.Title}' chỉ dành cho {targetLabel}, không phù hợp với giới tính của {bookingPatientName}." });
+            }
+
             // 3. Obtain target specialty & doctor matching the health package domain
             int targetSpecialtyId = 1;
             string titleLower = pkg.Title.ToLower();
@@ -154,9 +180,13 @@ public class HealthPackagesController : ControllerBase
             var targetSpecObj = await _context.Specialties.FirstOrDefaultAsync(s => s.SpecialtyId == targetSpecialtyId);
             string specName = targetSpecObj?.SpecialtyName ?? "Nội tổng quát";
 
-            var matchedDoctor = await _context.Doctors.FirstOrDefaultAsync(d => d.SpecialtyId == targetSpecialtyId && d.Status == "Active")
-                              ?? await _context.Doctors.FirstOrDefaultAsync(d => d.SpecialtyId == targetSpecialtyId)
-                              ?? await _context.Doctors.FirstOrDefaultAsync(d => d.Status == "Active")
+            // !IsTestData: tránh tự động xếp gói khám vào 1 hồ sơ bác sĩ "dữ liệu test" (Admin đánh dấu
+            // để QA thử nghiệm, vd "BS. Điều trị") — các hồ sơ này thường vẫn Status="Active" nên trước
+            // đây vẫn lọt vào được nhánh khớp đầu tiên nếu tình cờ đứng trước trong bảng.
+            var matchedDoctor = await _context.Doctors.FirstOrDefaultAsync(d => d.SpecialtyId == targetSpecialtyId && d.Status == "Active" && !d.IsTestData)
+                              ?? await _context.Doctors.FirstOrDefaultAsync(d => d.SpecialtyId == targetSpecialtyId && !d.IsTestData)
+                              ?? await _context.Doctors.FirstOrDefaultAsync(d => d.Status == "Active" && !d.IsTestData)
+                              ?? await _context.Doctors.FirstOrDefaultAsync(d => !d.IsTestData)
                               ?? await _context.Doctors.FirstOrDefaultAsync();
             if (matchedDoctor == null)
                 return BadRequest(new { message = "Không tìm thấy bác sĩ phù hợp để xếp lịch." });
@@ -201,11 +231,32 @@ public class HealthPackagesController : ControllerBase
 
             using (var schedCmd = conn.CreateCommand())
             {
-                schedCmd.CommandText = "SELECT schedule_id FROM doctor_schedules WHERE doctor_id = @dId AND work_date = @wDate LIMIT 1";
+                // Một bác sĩ có thể có NHIỀU dòng doctor_schedules trong cùng 1 ngày (ca sáng + ca chiều
+                // tách rời) — trước đây "LIMIT 1" lấy ĐẠI 1 dòng bất kỳ, có thể không phải ca chứa khung
+                // giờ bệnh nhân mong muốn (reqStart/reqEnd), giống lỗi đã sửa ở AppointmentsController.
+                // Ưu tiên đúng ca chứa reqStart nếu có, không thì tạm lấy dòng đầu tiên (giữ hành vi cũ
+                // cho trường hợp không khớp ca nào — gói khám vốn không bắt buộc khớp giờ chính xác).
+                schedCmd.CommandText = "SELECT schedule_id, start_time, end_time FROM doctor_schedules WHERE doctor_id = @dId AND work_date = @wDate ORDER BY start_time ASC";
                 var pD = schedCmd.CreateParameter(); pD.ParameterName = "@dId"; pD.Value = validDoctorId; schedCmd.Parameters.Add(pD);
                 var pW = schedCmd.CreateParameter(); pW.ParameterName = "@wDate"; pW.Value = workDateDb; schedCmd.Parameters.Add(pW);
-                var scVal = await schedCmd.ExecuteScalarAsync();
-                int scId = (scVal != null && scVal != DBNull.Value) ? Convert.ToInt32(scVal) : 0;
+                int scId = 0;
+                using (var schedReader = await schedCmd.ExecuteReaderAsync())
+                {
+                    int? firstRowId = null;
+                    while (await schedReader.ReadAsync())
+                    {
+                        int rowId = schedReader.GetInt32(0);
+                        firstRowId ??= rowId;
+                        var rowStart = GetTimeSpanValue(schedReader, 1);
+                        var rowEnd = GetTimeSpanValue(schedReader, 2);
+                        if (reqStart >= rowStart && reqStart < rowEnd)
+                        {
+                            scId = rowId;
+                            break;
+                        }
+                    }
+                    if (scId == 0 && firstRowId.HasValue) scId = firstRowId.Value;
+                }
 
                 if (scId == 0)
                 {
@@ -256,11 +307,12 @@ public class HealthPackagesController : ControllerBase
 
             string timeSlotSuffix = !string.IsNullOrWhiteSpace(req.PreferredTimeSlot) ? $" ({req.PreferredTimeSlot})" : "";
             string bookingReason = $"{specName} - Gói: {pkg.Title} - {preferredDateStr}{timeSlotSuffix}";
-            string noteContent = $"Gói khám: {pkg.Title} | {FormatPrice(pkg.Price)} | Khung giờ: {req.PreferredTimeSlot ?? "08:00 - 17:00"} | Bệnh nhân: {req.PatientName}";
+            string noteContent = $"Gói khám: {pkg.Title} | {FormatPrice(pkg.Price)} | Khung giờ: {req.PreferredTimeSlot ?? "08:00 - 17:00"} | Bệnh nhân: {bookingPatientName}";
 
             var appointment = new Appointment
             {
                 PatientId = validPatientId,
+                MemberId = familyMember?.MemberId,
                 DoctorId = validDoctorId,
                 SlotId = validSlotId,
                 Reason = bookingReason,
@@ -275,6 +327,28 @@ public class HealthPackagesController : ControllerBase
             await _context.SaveChangesAsync();
             newAppointmentId = appointment.AppointmentId;
 
+            // queueNum (tính trước lúc INSERT) chỉ là giá trị GỬI XUỐNG — trigger CSDL
+            // trg_set_queue_number (BEFORE INSERT) tự ý gán lại queue_number bằng slot_order của
+            // slot đã chọn, ĐÈ LÊN giá trị C# vừa gửi, và EF không tự đọc lại giá trị đã bị trigger
+            // sửa. Đọc lại trực tiếp để số thứ tự trả về khớp đúng số thật trong DB (giống lỗi đã sửa
+            // ở AppointmentsController.CreateAppointment).
+            int finalQueueNum = queueNum;
+            if (newAppointmentId > 0)
+            {
+                try
+                {
+                    using var qCmd = conn.CreateCommand();
+                    qCmd.CommandText = "SELECT queue_number FROM appointments WHERE appointment_id = @id";
+                    var qP = qCmd.CreateParameter(); qP.ParameterName = "@id"; qP.Value = newAppointmentId; qCmd.Parameters.Add(qP);
+                    var qVal = await qCmd.ExecuteScalarAsync();
+                    if (qVal != null && qVal != DBNull.Value) finalQueueNum = Convert.ToInt32(qVal);
+                }
+                catch (Exception qEx)
+                {
+                    Console.WriteLine("Reload queue_number after insert failed: " + qEx.Message);
+                }
+            }
+
             // 7. Push notification
             var pkgPatient = await _context.Patients.FirstOrDefaultAsync(p => p.PatientId == validPatientId);
             if (pkgPatient != null && pkgPatient.UserId != Guid.Empty)
@@ -284,7 +358,7 @@ public class HealthPackagesController : ControllerBase
                 {
                     UserId = pkgPatient.UserId,
                     Title = "✅ Đặt Gói Khám Sức Khỏe Thành Công",
-                    Content = $"Bạn đã đặt thành công gói khám '{pkg.Title}' (giá {FormatPrice(pkg.Price)}), dự kiến khám ngày {apptDateForPackage:dd/MM/yyyy}{timeNotice}. Số thứ tự dự kiến: {queueNum}.\n\nVui lòng đến bệnh viện đúng ngày hẹn để làm thủ tục tiếp đón.",
+                    Content = $"Bạn đã đặt thành công gói khám '{pkg.Title}' cho {(familyMember != null ? bookingPatientName : "bạn")} (giá {FormatPrice(pkg.Price)}), dự kiến khám ngày {apptDateForPackage:dd/MM/yyyy}{timeNotice}. Số thứ tự dự kiến: {finalQueueNum}.\n\nVui lòng đến bệnh viện đúng ngày hẹn để làm thủ tục tiếp đón.",
                     Type = "appointment",
                     RelatedId = newAppointmentId > 0 ? newAppointmentId : (int?)null,
                     RelatedType = "appointment",
@@ -302,7 +376,7 @@ public class HealthPackagesController : ControllerBase
                 packageTitle = pkg.Title,
                 priceFormatted = FormatPrice(pkg.Price),
                 preferredDate = apptDateForPackage.ToString("dd/MM/yyyy"),
-                queueNumber = queueNum
+                queueNumber = finalQueueNum
             });
         }
         catch (Exception ex)
@@ -310,6 +384,15 @@ public class HealthPackagesController : ControllerBase
             Console.WriteLine("Error booking package: " + ex.Message);
             return StatusCode(500, new { message = "Lỗi đặt gói khám: " + ex.Message });
         }
+    }
+
+    // Helper: đọc cột time (start_time/end_time) an toàn bất kể driver trả về TimeSpan hay DateTime
+    private static TimeSpan GetTimeSpanValue(System.Data.Common.DbDataReader reader, int ordinal)
+    {
+        var value = reader.GetValue(ordinal);
+        if (value is TimeSpan ts) return ts;
+        if (value is DateTime dt) return dt.TimeOfDay;
+        return TimeSpan.TryParse(value?.ToString(), out var parsed) ? parsed : TimeSpan.Zero;
     }
 
     // Helper: Format price as Vietnamese currency string
@@ -347,6 +430,8 @@ public class HealthPackageResponseDto
 public class BookPackageRequest
 {
     public int PatientId { get; set; }
+    /// <summary>Đặt gói khám cho hồ sơ người thân (family_members.member_id) thay vì chính chủ tài khoản.</summary>
+    public int? MemberId { get; set; }
     public string PatientName { get; set; } = string.Empty;
     public string? PreferredDate { get; set; }
     public string? PreferredTimeSlot { get; set; }

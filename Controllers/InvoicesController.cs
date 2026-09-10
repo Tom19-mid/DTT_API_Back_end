@@ -125,10 +125,18 @@ public class InvoicesController : ControllerBase
         var medRecord = await _context.MedicalRecords.FirstOrDefaultAsync(r => r.AppointmentId == appointmentId);
         if (medRecord == null) return 0m;
 
-        var prescription = await _context.Prescriptions.FirstOrDefaultAsync(p => p.MedicalRecordId == medRecord.MedicalRecordId);
-        if (prescription == null) return 0m;
+        // Một hồ sơ khám có thể có NHIỀU dòng Prescription (bác sĩ gọi lại API kê đơn nhiều lần cho
+        // cùng 1 ca khám, mỗi lần tạo 1 Prescription mới chứ không cập nhật đè đơn cũ — xem
+        // MedicalRecordsController.CreateMedicalRecord/DispensePrescription). Trước đây chỉ lấy đơn
+        // ĐẦU TIÊN tìm được nên hóa đơn có thể thiếu hẳn tiền thuốc của các đơn kê sau — giờ cộng dồn
+        // đủ mọi đơn thuộc cùng hồ sơ khám này.
+        var prescriptionIds = await _context.Prescriptions
+            .Where(p => p.MedicalRecordId == medRecord.MedicalRecordId)
+            .Select(p => p.PrescriptionId)
+            .ToListAsync();
+        if (prescriptionIds.Count == 0) return 0m;
 
-        var details = await _context.PrescriptionDetails.Where(d => d.PrescriptionId == prescription.PrescriptionId).ToListAsync();
+        var details = await _context.PrescriptionDetails.Where(d => prescriptionIds.Contains(d.PrescriptionId)).ToListAsync();
         if (details.Count == 0) return 0m;
 
         var medIds = details.Select(d => d.MedicineId).ToList();
@@ -218,6 +226,9 @@ public class InvoicesController : ControllerBase
                 {
                     AppointmentId = dto.AppointmentId,
                     PatientId = patient?.PatientId ?? appt.PatientId,
+                    // Gắn đúng hồ sơ người thân nếu lịch hẹn này đặt cho người thân (xem cùng lý do ở
+                    // MedicalRecordsController.CreateMedicalRecord) — trước đây luôn bỏ trống.
+                    MemberId = appt.MemberId,
                     TotalAmount = 0,
                     PaidAmount = 0,
                     PaymentStatus = "unpaid",
@@ -353,6 +364,18 @@ public class InvoicesController : ControllerBase
             if (string.IsNullOrWhiteSpace(dto.CccdNumber))
                 return BadRequest(new { success = false, message = "Vui lòng nhập Số CCCD sau khi đối chiếu thẻ cứng!" });
 
+            // Không cho phép 2 hồ sơ khác nhau dùng CHUNG 1 số CCCD — loại trừ đúng hồ sơ ĐANG thao tác
+            // (dto.ExistingPatientId/dto.MemberId, nếu có) để không tự chặn nhầm khi xác nhận lại CCCD
+            // đã đúng sẵn của chính hồ sơ đó.
+            bool cccdTakenByOtherPatient = await _context.Patients.AnyAsync(p =>
+                p.CccdNumber == dto.CccdNumber &&
+                !(dto.ExistingPatientId.HasValue && p.PatientId == dto.ExistingPatientId.Value));
+            bool cccdTakenByOtherMember = await _context.FamilyMembers.AnyAsync(m =>
+                m.CccdNumber == dto.CccdNumber &&
+                !(dto.MemberId.HasValue && m.MemberId == dto.MemberId.Value));
+            if (cccdTakenByOtherPatient || cccdTakenByOtherMember)
+                return BadRequest(new { success = false, message = "Số CCCD này đã được sử dụng cho một hồ sơ khác trong hệ thống." });
+
             // Tạo mật khẩu tạm thời dựa trên SĐT (4 số cuối)
             string lastFour = dto.Phone.Length >= 4 ? dto.Phone.Substring(dto.Phone.Length - 4) : "0000";
             string randomPwd = $"DTT@{lastFour}";
@@ -389,24 +412,85 @@ public class InvoicesController : ControllerBase
             }
 
             // Tìm hồ sơ Patient sẵn có hoặc tạo mới
-            var existingPatient = await _context.Patients.FirstOrDefaultAsync(p => p.UserId == targetUserId || p.PhoneNumber == dto.Phone);
             int targetPatientId;
-            if (existingPatient != null)
+            int? memberIdForAppt = null;
+            // Thông báo "tài khoản App Mobile vừa được tạo kèm mật khẩu tạm" (bên dưới, sau khối này)
+            // chỉ có ý nghĩa với người THẬT SỰ vừa được tạo/khớp tài khoản mới qua SĐT — 2 nhánh MỚI
+            // dưới đây (chọn sẵn 1 bệnh nhân/người thân ĐÃ CÓ hồ sơ từ tab "Đặt Khám Ngay") không tạo
+            // gì mới cả nên phải tắt thông báo này, tránh báo sai "vừa tạo tài khoản" cho người đã có
+            // tài khoản từ trước (đặc biệt phiền với nhánh người thân: SĐT gửi lên là SĐT của CHỦ TÀI
+            // KHOẢN do người thân thường không có SĐT riêng).
+            bool sendNewAccountNotification = true;
+
+            if (dto.MemberId.HasValue && dto.MemberId.Value > 0 && dto.OwnerPatientId.HasValue && dto.OwnerPatientId.Value > 0)
             {
+                sendNewAccountNotification = false;
+                // Đặt khám ngay cho HỒ SƠ NGƯỜI THÂN đã có sẵn (tab "Đặt Khám Ngay" tìm ra qua SĐT của
+                // chủ tài khoản) — chỉ được cập nhật đúng hồ sơ family_members đó, TUYỆT ĐỐI không đụng
+                // tới hồ sơ patients của chủ tài khoản.
+                var member = await _context.FamilyMembers.FirstOrDefaultAsync(m => m.MemberId == dto.MemberId.Value && m.OwnerPatientId == dto.OwnerPatientId.Value);
+                if (member == null)
+                    return BadRequest(new { success = false, message = "Không tìm thấy hồ sơ người thân hoặc hồ sơ không thuộc đúng chủ tài khoản." });
+                var ownerForMember = await _context.Patients.FirstOrDefaultAsync(p => p.PatientId == dto.OwnerPatientId.Value);
+                if (ownerForMember == null)
+                    return BadRequest(new { success = false, message = "Không tìm thấy hồ sơ chủ tài khoản của người thân này." });
+
+                member.CccdNumber = dto.CccdNumber;
+                if (!string.IsNullOrEmpty(dto.BhytNumber)) member.HealthInsuranceNumber = dto.BhytNumber;
+                if (member.VerificationStatus != "verified")
+                {
+                    member.VerificationStatus = "verified";
+                    member.VerifiedBy = GetCurrentStaffUserId();
+                    member.VerifiedAt = DateTime.UtcNow;
+                    member.VerificationNote = $"Đối chiếu CCCD khi Đặt Khám Ngay tại quầy Lễ Tân. Ngày: {DateTime.Now:dd/MM/yyyy HH:mm}";
+                }
+                member.UpdatedAt = DateTime.UtcNow;
+                await _context.SaveChangesAsync();
+
+                targetPatientId = ownerForMember.PatientId;
+                memberIdForAppt = member.MemberId;
+            }
+            else if (dto.ExistingPatientId.HasValue && dto.ExistingPatientId.Value > 0)
+            {
+                sendNewAccountNotification = false;
+                // Đặt khám ngay cho 1 BỆNH NHÂN đã có sẵn hồ sơ (tab "Đặt Khám Ngay") — chỉ cập nhật CCCD
+                // vừa đối chiếu, KHÔNG ghi đè họ tên/thông tin định danh đã đúng sẵn của họ bằng dto.FullName
+                // (khác nhánh "vãng lai mới hoàn toàn" bên dưới, nơi FullName THẬT SỰ là dữ liệu mới).
+                var existingPatient = await _context.Patients.FirstOrDefaultAsync(p => p.PatientId == dto.ExistingPatientId.Value);
+                if (existingPatient == null)
+                    return BadRequest(new { success = false, message = "Không tìm thấy hồ sơ bệnh nhân." });
+
+                existingPatient.CccdNumber = dto.CccdNumber;
+                if (!string.IsNullOrEmpty(dto.BhytNumber)) existingPatient.HealthInsuranceNumber = dto.BhytNumber;
+                if (existingPatient.VerificationStatus != "verified")
+                {
+                    existingPatient.VerificationStatus = "verified";
+                    existingPatient.VerifiedBy = GetCurrentStaffUserId();
+                    existingPatient.VerifiedAt = DateTime.UtcNow;
+                }
+                existingPatient.UpdatedAt = DateTime.UtcNow;
+                await _context.SaveChangesAsync();
+                targetPatientId = existingPatient.PatientId;
+            }
+            else if (await _context.Patients.FirstOrDefaultAsync(p => p.UserId == targetUserId || p.PhoneNumber == dto.Phone) is Patient existingPatientByPhone)
+            {
+                // Đăng ký vãng lai MỚI HOÀN TOÀN (tab "Đăng Ký Vãng Lai") nhưng trùng SĐT với 1 hồ sơ đã
+                // có sẵn trong DB (vd bệnh nhân cũ quay lại mà Lễ tân không tra cứu trước) — giữ nguyên
+                // hành vi gốc: cập nhật lại hồ sơ đó bằng thông tin vừa nhập.
                 // DB có trigger trg_create_profile_on_user_insert tự tạo sẵn 1 dòng patients rỗng
                 // (phone_number NULL) ngay khi tạo users mới — nhánh update này trước đây quên gán lại
                 // PhoneNumber, nên bệnh nhân vãng lai luôn có users.phone_number đúng nhưng
                 // patients.phone_number NULL vĩnh viễn (lộ ra ở màn "Lịch Sử Hồ Sơ Bệnh Án" — cột SĐT
                 // trống dù đăng ký có nhập số điện thoại).
-                existingPatient.FullName = dto.FullName;
-                existingPatient.PhoneNumber = dto.Phone;
-                existingPatient.CccdNumber = dto.CccdNumber;
-                if (!string.IsNullOrEmpty(dto.BhytNumber)) existingPatient.HealthInsuranceNumber = dto.BhytNumber;
-                existingPatient.VerificationStatus = "verified";
-                existingPatient.VerifiedAt = DateTime.UtcNow;
-                existingPatient.UpdatedAt = DateTime.UtcNow;
+                existingPatientByPhone.FullName = dto.FullName;
+                existingPatientByPhone.PhoneNumber = dto.Phone;
+                existingPatientByPhone.CccdNumber = dto.CccdNumber;
+                if (!string.IsNullOrEmpty(dto.BhytNumber)) existingPatientByPhone.HealthInsuranceNumber = dto.BhytNumber;
+                existingPatientByPhone.VerificationStatus = "verified";
+                existingPatientByPhone.VerifiedAt = DateTime.UtcNow;
+                existingPatientByPhone.UpdatedAt = DateTime.UtcNow;
                 await _context.SaveChangesAsync();
-                targetPatientId = existingPatient.PatientId;
+                targetPatientId = existingPatientByPhone.PatientId;
             }
             else
             {
@@ -452,25 +536,31 @@ public class InvoicesController : ControllerBase
             if (dto.DoctorId > 0)
             {
                 int validSlotId = 0;
+                var todayVnForSlot = DateOnly.FromDateTime(DateTime.UtcNow.AddHours(7));
                 try
                 {
                     var conn = _context.Database.GetDbConnection();
                     if (conn.State != System.Data.ConnectionState.Open) await conn.OpenAsync();
 
-                    // CHỈ chọn slot đang RẢNH (không bị appointment active nào chiếm) — trước đây dùng
-                    // "ORDER BY slot_id DESC LIMIT 1" lấy bừa slot mới nhất của bác sĩ bất kể còn trống
-                    // hay không, nên khi bác sĩ đã có 1 lịch hẹn active dùng đúng slot đó, lần đăng ký
-                    // vãng lai tiếp theo cho cùng bác sĩ sẽ đụng UNIQUE constraint idx_appointments_slot_active.
+                    // CHỈ chọn slot đang RẢNH (không bị appointment active nào chiếm) của ĐÚNG NGÀY HÔM NAY
+                    // — trước đây dùng "ORDER BY slot_id DESC LIMIT 1" lấy bừa slot mới nhất của bác sĩ bất
+                    // kể còn trống hay không VÀ bất kể thuộc ngày nào, nên khi bác sĩ đã có 1 lịch hẹn active
+                    // dùng đúng slot đó, lần đăng ký vãng lai tiếp theo cho cùng bác sĩ sẽ đụng UNIQUE
+                    // constraint idx_appointments_slot_active; đồng thời slot_id có thể thuộc 1 schedule của
+                    // ngày KHÁC trong khi appointment.appointment_date luôn được set = hôm nay (todayVn bên
+                    // dưới), gây lệch dữ liệu slot/ngày.
                     using var slotCmd = conn.CreateCommand();
                     slotCmd.CommandText = @"
                         SELECT s.slot_id
                         FROM doctor_schedule_slots s
                         JOIN doctor_schedules ds ON s.schedule_id = ds.schedule_id
                         WHERE ds.doctor_id = @docId
+                          AND ds.work_date = @workDate
                           AND s.slot_id NOT IN (SELECT slot_id FROM appointments WHERE slot_id IS NOT NULL AND is_active = true)
                         ORDER BY s.slot_id DESC
                         LIMIT 1";
                     var pDoc = slotCmd.CreateParameter(); pDoc.ParameterName = "@docId"; pDoc.Value = dto.DoctorId; slotCmd.Parameters.Add(pDoc);
+                    var pWd = slotCmd.CreateParameter(); pWd.ParameterName = "@workDate"; pWd.Value = todayVnForSlot.ToDateTime(TimeOnly.MinValue); slotCmd.Parameters.Add(pWd);
                     var val = await slotCmd.ExecuteScalarAsync();
                     if (val != null && val != DBNull.Value) validSlotId = Convert.ToInt32(val);
 
@@ -478,8 +568,9 @@ public class InvoicesController : ControllerBase
                     {
                         int scId = 0;
                         using var schedCheck = conn.CreateCommand();
-                        schedCheck.CommandText = "SELECT schedule_id FROM doctor_schedules WHERE doctor_id = @docId LIMIT 1";
+                        schedCheck.CommandText = "SELECT schedule_id FROM doctor_schedules WHERE doctor_id = @docId AND work_date = @workDate LIMIT 1";
                         var pDoc2 = schedCheck.CreateParameter(); pDoc2.ParameterName = "@docId"; pDoc2.Value = dto.DoctorId; schedCheck.Parameters.Add(pDoc2);
+                        var pWd2 = schedCheck.CreateParameter(); pWd2.ParameterName = "@workDate"; pWd2.Value = todayVnForSlot.ToDateTime(TimeOnly.MinValue); schedCheck.Parameters.Add(pWd2);
                         var scVal = await schedCheck.ExecuteScalarAsync();
                         if (scVal != null && scVal != DBNull.Value) scId = Convert.ToInt32(scVal);
 
@@ -512,10 +603,11 @@ public class InvoicesController : ControllerBase
                     Console.WriteLine("RegisterWalkIn slot lookup exception: " + ex.Message);
                 }
 
-                var todayVn = DateOnly.FromDateTime(DateTime.UtcNow.AddHours(7));
+                var todayVn = todayVnForSlot;
                 var newAppt = new Appointment
                 {
                     PatientId = targetPatientId,
+                    MemberId = memberIdForAppt,
                     DoctorId = dto.DoctorId,
                     // slot_id có FOREIGN KEY tới doctor_schedule_slots — để NULL nếu không tạo được slot nào
                     // hợp lệ, thay vì fallback cứng về 1 (gần như chắc chắn đã bị chiếm hoặc không tồn tại).
@@ -546,11 +638,12 @@ public class InvoicesController : ControllerBase
                         if (conn.State != System.Data.ConnectionState.Open) await conn.OpenAsync();
                         using var rawCmd = conn.CreateCommand();
                         rawCmd.CommandText = @"
-                            INSERT INTO appointments (patient_id, doctor_id, slot_id, status_id, queue_number, reason, note, is_active, appointment_date, created_at, updated_at) 
-                            VALUES (@pId, @dId, @sId, 7, @qNum, @reason, @note, true, CURRENT_DATE, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP) 
+                            INSERT INTO appointments (patient_id, member_id, doctor_id, slot_id, status_id, queue_number, reason, note, is_active, appointment_date, created_at, updated_at)
+                            VALUES (@pId, @mId, @dId, @sId, 7, @qNum, @reason, @note, true, CURRENT_DATE, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
                             RETURNING appointment_id";
 
                         var p1 = rawCmd.CreateParameter(); p1.ParameterName = "@pId"; p1.Value = targetPatientId; rawCmd.Parameters.Add(p1);
+                        var pMember = rawCmd.CreateParameter(); pMember.ParameterName = "@mId"; pMember.Value = (object?)memberIdForAppt ?? DBNull.Value; rawCmd.Parameters.Add(pMember);
                         var p2 = rawCmd.CreateParameter(); p2.ParameterName = "@dId"; p2.Value = dto.DoctorId; rawCmd.Parameters.Add(p2);
                         var p3 = rawCmd.CreateParameter(); p3.ParameterName = "@sId"; p3.Value = validSlotId > 0 ? validSlotId : (object)DBNull.Value; rawCmd.Parameters.Add(p3);
                         var p4 = rawCmd.CreateParameter(); p4.ParameterName = "@qNum"; p4.Value = newAppt.QueueNumber; rawCmd.Parameters.Add(p4);
@@ -567,57 +660,72 @@ public class InvoicesController : ControllerBase
                 }
             }
 
-            // Gửi thông báo nội bộ (giải lập SMS)
-            _context.Notifications.Add(new Notification
+            // Gửi thông báo nội bộ (giải lập SMS) — chỉ khi thật sự vừa tạo/khớp tài khoản mới qua SĐT
+            // (xem giải thích ở khai báo sendNewAccountNotification phía trên).
+            if (sendNewAccountNotification)
             {
-                UserId = targetUserId,
-                Title = "🏥 DTT Healthcare - Tài khoản App Mobile của bạn đã được tạo",
-                Content = $"Kính gửi {dto.FullName}," +
-                          $"\n\nLễ Tân Bệnh viện DTT Healthcare đã tạo sẵn tài khoản ứng dụng di động cho bạn." +
-                          $"\n\n📱 Tải App: DTT Healthcare (Google Play / App Store)" +
-                          $"\n📞 SĐT đăng nhập: {dto.Phone}" +
-                          $"\n🔑 Mật khẩu tạm thời: {randomPwd}" +
-                          $"\n\n⚠️ Vui lòng đổi mật khẩu ngay sau lần đăng nhập đầu tiên!" +
-                          $"\n\nHồ sơ y tế và lịch sử khám bệnh của bạn sẽ được lưu trữ tự động trên ứng dụng.",
-                Type = "system",
-                IsRead = false,
-                CreatedAt = DateTime.UtcNow
-            });
+                _context.Notifications.Add(new Notification
+                {
+                    UserId = targetUserId,
+                    Title = "🏥 DTT Healthcare - Tài khoản App Mobile của bạn đã được tạo",
+                    Content = $"Kính gửi {dto.FullName}," +
+                              $"\n\nLễ Tân Bệnh viện DTT Healthcare đã tạo sẵn tài khoản ứng dụng di động cho bạn." +
+                              $"\n\n📱 Tải App: DTT Healthcare (Google Play / App Store)" +
+                              $"\n📞 SĐT đăng nhập: {dto.Phone}" +
+                              $"\n🔑 Mật khẩu tạm thời: {randomPwd}" +
+                              $"\n\n⚠️ Vui lòng đổi mật khẩu ngay sau lần đăng nhập đầu tiên!" +
+                              $"\n\nHồ sơ y tế và lịch sử khám bệnh của bạn sẽ được lưu trữ tự động trên ứng dụng.",
+                    Type = "system",
+                    IsRead = false,
+                    CreatedAt = DateTime.UtcNow
+                });
+            }
 
             await _context.SaveChangesAsync();
 
-            // Tự động ghi đồng bộ thông tin vào file static users.csv & patients.csv trên đĩa
-            try
+            // Tự động ghi đồng bộ thông tin vào file static users.csv & patients.csv trên đĩa — CHỈ khi
+            // thật sự vừa tạo/khớp tài khoản mới qua SĐT. Nhánh "chọn sẵn bệnh nhân/người thân đã có hồ
+            // sơ" (2 nhánh mới ở trên) KHÔNG được ghi dòng nào vào đây: targetPatientId ở 2 nhánh đó có
+            // thể là patient_id của CHỦ TÀI KHOẢN trong khi dto.FullName lại là tên NGƯỜI THÂN — ghi CSV
+            // trong trường hợp này sẽ tạo ra 1 dòng patients.csv sai tên cho đúng patientId đó (lặp lại
+            // đúng kiểu lỗi đã sửa ở DB thật phía trên, chỉ khác là ở file tĩnh).
+            if (sendNewAccountNotification)
             {
-                string dbDir = System.IO.Path.Combine(System.IO.Directory.GetCurrentDirectory(), "..", "Chức năng của app bệnh nhân", "db");
-                if (System.IO.Directory.Exists(dbDir))
+                try
                 {
-                    string usersCsv = System.IO.Path.Combine(dbDir, "users.csv");
-                    if (System.IO.File.Exists(usersCsv))
+                    string dbDir = System.IO.Path.Combine(System.IO.Directory.GetCurrentDirectory(), "..", "Chức năng của app bệnh nhân", "db");
+                    if (System.IO.Directory.Exists(dbDir))
                     {
-                        string userRow = $"\"{targetUserId}\",\"{dto.Phone}\",\"{dto.Phone}@gmail.com\",\"{csvPasswordHash}\",{csvRoleId},\"Active\",NULL,\"{DateTime.Now:yyyy-MM-dd HH:mm:ss.ffffff}\",\"{DateTime.Now:yyyy-MM-dd HH:mm:ss.ffffff}\"";
-                        System.IO.File.AppendAllLines(usersCsv, new[] { userRow });
-                    }
+                        string usersCsv = System.IO.Path.Combine(dbDir, "users.csv");
+                        if (System.IO.File.Exists(usersCsv))
+                        {
+                            string userRow = $"\"{targetUserId}\",\"{dto.Phone}\",\"{dto.Phone}@gmail.com\",\"{csvPasswordHash}\",{csvRoleId},\"Active\",NULL,\"{DateTime.Now:yyyy-MM-dd HH:mm:ss.ffffff}\",\"{DateTime.Now:yyyy-MM-dd HH:mm:ss.ffffff}\"";
+                            System.IO.File.AppendAllLines(usersCsv, new[] { userRow });
+                        }
 
-                    string patientsCsv = System.IO.Path.Combine(dbDir, "patients.csv");
-                    if (System.IO.File.Exists(patientsCsv))
-                    {
-                        string patientRow = $"{targetPatientId},\"{targetUserId}\",\"{dto.FullName}\",NULL,\"{dto.Gender ?? "Nam"}\",NULL,NULL,\"{DateTime.Now:yyyy-MM-dd HH:mm:ss.ffffff}\",\"{DateTime.Now:yyyy-MM-dd HH:mm:ss.ffffff}\",\"verified\",\"{DateTime.Now:yyyy-MM-dd HH:mm:ss.ffffff}\",NULL,NULL,\"{dto.CccdNumber}\",\"{dto.Phone}\",NULL";
-                        System.IO.File.AppendAllLines(patientsCsv, new[] { patientRow });
+                        string patientsCsv = System.IO.Path.Combine(dbDir, "patients.csv");
+                        if (System.IO.File.Exists(patientsCsv))
+                        {
+                            string patientRow = $"{targetPatientId},\"{targetUserId}\",\"{dto.FullName}\",NULL,\"{dto.Gender ?? "Nam"}\",NULL,NULL,\"{DateTime.Now:yyyy-MM-dd HH:mm:ss.ffffff}\",\"{DateTime.Now:yyyy-MM-dd HH:mm:ss.ffffff}\",\"verified\",\"{DateTime.Now:yyyy-MM-dd HH:mm:ss.ffffff}\",NULL,NULL,\"{dto.CccdNumber}\",\"{dto.Phone}\",NULL";
+                            System.IO.File.AppendAllLines(patientsCsv, new[] { patientRow });
+                        }
                     }
                 }
+                catch { }
             }
-            catch { }
 
             return Ok(new
             {
                 success = true,
-                message = "Đã tạo hồ sơ bệnh nhân vãng lai thành công!",
+                message = sendNewAccountNotification
+                    ? "Đã tạo hồ sơ bệnh nhân vãng lai thành công!"
+                    : "Đã đặt khám thành công!",
                 patientId = targetPatientId,
+                memberId = memberIdForAppt,
                 userId = targetUserId,
                 appointmentId = newAppointmentId,
-                tempPassword = randomPwd,
-                note = $"Đã giả lập gửi SMS thông báo tài khoản đến SĐT {dto.Phone}"
+                tempPassword = sendNewAccountNotification ? randomPwd : null,
+                note = sendNewAccountNotification ? $"Đã giả lập gửi SMS thông báo tài khoản đến SĐT {dto.Phone}" : null
             });
         }
         catch (Exception ex)
@@ -847,6 +955,7 @@ public class InvoicesController : ControllerBase
                 {
                     AppointmentId = appointmentId,
                     PatientId = patient?.PatientId ?? (appt?.PatientId ?? 0),
+                    MemberId = appt?.MemberId,
                     TotalAmount = 0,
                     PaidAmount = 0,
                     PaymentStatus = "unpaid",
@@ -1442,6 +1551,20 @@ public class RegisterWalkInDto
     public string? Address { get; set; }
     public int DoctorId { get; set; }
     public string? SpecialtyName { get; set; }
+
+    /// <summary>Đặt khám ngay cho 1 BỆNH NHÂN đã có sẵn hồ sơ (chọn từ tab "Đặt Khám Ngay", không phải
+    /// đăng ký vãng lai mới hoàn toàn) — patients.patient_id thật. Khi có giá trị này, KHÔNG được ghi
+    /// đè FullName/thông tin định danh đã đúng sẵn của họ, chỉ cập nhật CCCD vừa đối chiếu.</summary>
+    public int? ExistingPatientId { get; set; }
+
+    /// <summary>Đặt khám ngay cho 1 HỒ SƠ NGƯỜI THÂN đã có sẵn (family_members.member_id) — phải đi kèm
+    /// OwnerPatientId. Khi có giá trị này, appointment được gán cho patient_id của CHỦ TÀI KHOẢN kèm
+    /// member_id này, và chỉ hồ sơ family_members mới được cập nhật CCCD — KHÔNG được đụng tới hồ sơ
+    /// patients của chủ tài khoản (đây chính là lỗi cần sửa: trước đây RegisterWalkIn luôn tìm
+    /// patients theo SĐT, mà người thân thường dùng chung SĐT với chủ tài khoản do không có SĐT riêng,
+    /// nên vô tình ghi đè họ tên/CCCD/BHYT thật của chủ tài khoản bằng thông tin của người thân).</summary>
+    public int? MemberId { get; set; }
+    public int? OwnerPatientId { get; set; }
 }
 
 public class VnPayPaymentRequestDto

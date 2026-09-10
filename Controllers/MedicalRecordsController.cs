@@ -64,6 +64,14 @@ namespace DTT_Backend_API.Controllers
                     .Where(d => doctorIds.Contains(d.DoctorId))
                     .ToDictionaryAsync(d => d.DoctorId);
 
+                // Hồ sơ khám của NGƯỜI THÂN (đặt lịch qua memberId) phải hiển thị tên/giới tính/ngày sinh
+                // của chính người thân đó, không phải của chủ tài khoản — cùng cơ chế với
+                // AppointmentsController.FormatAppointmentListAsync.
+                var memberIds = records.Where(r => r.MemberId.HasValue).Select(r => r.MemberId!.Value).Distinct().ToList();
+                var familyMembers = memberIds.Count > 0
+                    ? await _context.FamilyMembers.Where(m => memberIds.Contains(m.MemberId)).ToDictionaryAsync(m => m.MemberId)
+                    : new Dictionary<int, FamilyMember>();
+
                 var prescriptions = await _context.Prescriptions
                     .Where(p => recordIds.Contains(p.MedicalRecordId))
                     .ToListAsync();
@@ -83,18 +91,27 @@ namespace DTT_Backend_API.Controllers
                 {
                     patients.TryGetValue(r.PatientId, out var patient);
                     doctors.TryGetValue(r.DoctorId, out var doctor);
+                    FamilyMember? member = r.MemberId.HasValue ? familyMembers.GetValueOrDefault(r.MemberId.Value) : null;
 
-                    var rx = prescriptions.FirstOrDefault(p => p.MedicalRecordId == r.MedicalRecordId);
-                    var details = rx != null && detailsByPrescriptionId.TryGetValue(rx.PrescriptionId, out var dList)
-                        ? dList
-                        : new List<PrescriptionDetail>();
+                    // [Old code]: var rx = prescriptions.FirstOrDefault(p => p.MedicalRecordId == r.MedicalRecordId);
+                    // chỉ lấy 1 đơn -> nếu hồ sơ có ≥2 Prescription (bác sĩ kê thêm đơn sau khi có kết quả
+                    // CLS, xem chú thích ở /dispense) thì tóm tắt "TOA THUỐC KÊ" và bản in lại từ Lịch Sử
+                    // Khám Bệnh (PrintPrescriptionForm) sẽ THIẾU hẳn thuốc của (các) đơn còn lại.
+                    // [New code - gộp thuốc từ TOÀN BỘ đơn của hồ sơ này]:
+                    var rxForRecord = prescriptions.Where(p => p.MedicalRecordId == r.MedicalRecordId).ToList();
+                    var rx = rxForRecord.FirstOrDefault();
+                    var details = new List<PrescriptionDetail>();
+                    foreach (var rxItem in rxForRecord)
+                    {
+                        if (detailsByPrescriptionId.TryGetValue(rxItem.PrescriptionId, out var dList)) details.AddRange(dList);
+                    }
 
                     string presSummary = details.Count > 0
                         ? string.Join(", ", details.Select(d => $"{d.MedicineNameSnapshot} ({d.Quantity} {d.UnitSnapshot})"))
                         : (rx != null && !string.IsNullOrEmpty(rx.Note) ? rx.Note : "");
 
-                    string patientName = patient?.FullName ?? "Bệnh nhân";
-                    string phone = patient?.PhoneNumber ?? "";
+                    string patientName = member != null ? (member.FullName ?? "Người thân") : (patient?.FullName ?? "Bệnh nhân");
+                    string phone = member?.PhoneNumber ?? patient?.PhoneNumber ?? "";
                     string doctorName = doctor != null ? $"{doctor.Degree} {doctor.FullName}".Trim() : "Bác sĩ";
 
                     // Filter search if provided
@@ -113,10 +130,11 @@ namespace DTT_Backend_API.Controllers
                         medicalRecordId = r.MedicalRecordId,
                         appointmentId = r.AppointmentId,
                         patientId = r.PatientId,
+                        memberId = r.MemberId,
                         patientName = patientName,
                         phoneNumber = phone,
-                        gender = patient?.Gender ?? "",
-                        dateOfBirth = patient?.DateOfBirth?.ToString("dd/MM/yyyy") ?? "",
+                        gender = member?.Gender ?? patient?.Gender ?? "",
+                        dateOfBirth = (member?.DateOfBirth ?? patient?.DateOfBirth)?.ToString("dd/MM/yyyy") ?? "",
                         doctorId = r.DoctorId,
                         doctorName = doctorName,
                         examinationDate = r.ExaminationDate.ToString("dd/MM/yyyy HH:mm"),
@@ -194,6 +212,20 @@ namespace DTT_Backend_API.Controllers
                     .AsNoTracking()
                     .FirstOrDefaultAsync(p => p.PatientId == patientId);
                 string patientName = patient?.FullName ?? "Bệnh nhân";
+
+                // Danh sách "Phiếu khám" của tài khoản này gộp CHUNG cả hồ sơ của chủ tài khoản lẫn của
+                // NGƯỜI THÂN (đặt lịch qua memberId dùng chung patientId của chủ tài khoản) — trước đây
+                // toàn bộ 5 danh mục (Phiếu khám/Toa thuốc/Xét nghiệm/Siêu âm/Hóa đơn) luôn hiển thị cứng
+                // patientName của chủ tài khoản, nên khám cho người thân vẫn hiện tên chủ tài khoản.
+                var memberIds = records.Where(r => r.MemberId.HasValue).Select(r => r.MemberId!.Value).Distinct().ToList();
+                var familyMembers = memberIds.Count > 0
+                    ? await _context.FamilyMembers.AsNoTracking().Where(m => memberIds.Contains(m.MemberId)).ToDictionaryAsync(m => m.MemberId)
+                    : new Dictionary<int, FamilyMember>();
+                string GetDisplayName(int? memberId)
+                {
+                    if (memberId.HasValue && familyMembers.TryGetValue(memberId.Value, out var m)) return m.FullName ?? "Người thân";
+                    return patientName;
+                }
 
                 var doctorIds = records.Select(r => r.DoctorId).Union(appts.Select(a => a.DoctorId)).Distinct().ToList();
                 var doctors = await _context.Doctors
@@ -278,8 +310,14 @@ namespace DTT_Backend_API.Controllers
                 {
                     var docName = GetDoctorName(r.DoctorId);
                     var specName = GetSpecialtyName(r.DoctorId, r.AppointmentId);
-                    var rx = prescriptions.FirstOrDefault(p => p.MedicalRecordId == r.MedicalRecordId);
-                    var details = rx != null && detailsByPrescriptionId.TryGetValue(rx.PrescriptionId, out var dList) ? dList : new List<PrescriptionDetail>();
+                    // Một hồ sơ khám có thể có NHIỀU đơn thuốc (bác sĩ mở lại ca khám sau khi có kết quả
+                    // CLS rồi kê thêm) — trước đây chỉ lấy đơn ĐẦU TIÊN (FirstOrDefault) nên "Phiếu khám"
+                    // ở Mobile thiếu hẳn thuốc của các đơn kê sau, cùng lỗi đã sửa ở hàng đợi Dược sĩ và
+                    // Lịch sử khám bên WinForms. Gộp thuốc của TẤT CẢ đơn thuộc cùng hồ sơ khám này.
+                    var details = prescriptions
+                        .Where(p => p.MedicalRecordId == r.MedicalRecordId)
+                        .SelectMany(p => detailsByPrescriptionId.TryGetValue(p.PrescriptionId, out var dList) ? dList : new List<PrescriptionDetail>())
+                        .ToList();
                     var rxItems = details.Select(d => new
                     {
                         name = $"{d.MedicineNameSnapshot} - SL: {d.Quantity} {d.UnitSnapshot}",
@@ -292,7 +330,8 @@ namespace DTT_Backend_API.Controllers
                         medicalRecordId = r.MedicalRecordId,
                         appointmentId = r.AppointmentId,
                         patientId = r.PatientId,
-                        patientName = patientName,
+                        memberId = r.MemberId,
+                        patientName = GetDisplayName(r.MemberId),
                         code = $"PK-{r.ExaminationDate:yyyyMMdd}-{r.MedicalRecordId:D3}",
                         date = r.ExaminationDate.ToString("dd/MM/yyyy HH:mm"),
                         specialtyName = specName,
@@ -368,7 +407,7 @@ namespace DTT_Backend_API.Controllers
                         appointmentId = apptId,
                         code = $"DT-{rx.CreatedAt:yyyyMMdd}-{rx.PrescriptionId:D3}",
                         date = rx.CreatedAt.ToString("dd/MM/yyyy"),
-                        patientName = patientName,
+                        patientName = GetDisplayName(rec?.MemberId),
                         doctor = docName,
                         specialtyName = specName,
                         clinicKey = specName,
@@ -410,7 +449,7 @@ namespace DTT_Backend_API.Controllers
                         status = t.ResultStatus,
                         unit = t.Unit ?? "",
                         referenceRange = t.ReferenceRange ?? "",
-                        patientName = patientName,
+                        patientName = GetDisplayName(rec?.MemberId),
                         doctor = docName,
                         specialtyName = specName,
                         clinicKey = "Xét nghiệm",
@@ -447,7 +486,7 @@ namespace DTT_Backend_API.Controllers
                         result = resultDisplay,
                         status = u.ResultStatus,
                         imageUrls = u.ImageUrls ?? Array.Empty<string>(),
-                        patientName = patientName,
+                        patientName = GetDisplayName(rec?.MemberId),
                         doctor = docName,
                         specialtyName = specName,
                         clinicKey = "Chẩn đoán hình ảnh",
@@ -485,7 +524,7 @@ namespace DTT_Backend_API.Controllers
                         paidAmount = inv.PaidAmount,
                         paymentStatus = inv.PaymentStatus,
                         paymentMethod = inv.PaymentMethod ?? "cash",
-                        patientName = patientName,
+                        patientName = GetDisplayName(inv.MemberId ?? rec?.MemberId),
                         doctor = docName,
                         specialtyName = specName,
                         clinicKey = specName,
@@ -561,10 +600,17 @@ namespace DTT_Backend_API.Controllers
                 var record = await _context.MedicalRecords.FirstOrDefaultAsync(r => r.AppointmentId == dto.AppointmentId);
                 if (record == null)
                 {
+                    // Nếu lịch hẹn này được đặt cho HỒ SƠ NGƯỜI THÂN (appointments.member_id, xem
+                    // AppointmentsController.CreateAppointment), hồ sơ khám bệnh phải gắn đúng người đó
+                    // — trước đây luôn bỏ trống nên hồ sơ khám/hóa đơn/đơn thuốc của người thân bị gộp
+                    // chung vào tên chủ tài khoản dù đúng lịch hẹn đã hiện đúng tên người thân.
+                    var apptForRecord = await _context.Appointments.FirstOrDefaultAsync(a => a.AppointmentId == dto.AppointmentId);
+
                     record = new MedicalRecord
                     {
                         AppointmentId = dto.AppointmentId,
                         PatientId = dto.PatientId,
+                        MemberId = apptForRecord?.MemberId,
                         DoctorId = dto.DoctorId,
                         ExaminationDate = DateTime.UtcNow,
                         Status = "Completed",
@@ -595,23 +641,55 @@ namespace DTT_Backend_API.Controllers
 
                 await _context.SaveChangesAsync();
 
-                // 2. Táº¡o Prescription
+                // 2. Tạo/cập nhật Prescription — 1 hồ sơ khám (medical_record) chỉ có ĐÚNG 1
+                // Prescription (ràng buộc UNIQUE thật trên DB: prescriptions_medical_record_id_key,
+                // đã xác nhận trực tiếp qua pg_constraint). ExaminationForm luôn gửi lên TOÀN BỘ danh
+                // sách thuốc hiện tại của ca khám mỗi lần lưu (_prescriptions là state đầy đủ của
+                // form, không phải chỉ phần mới thêm) — nên nếu hồ sơ này ĐÃ có sẵn 1 đơn thuốc từ
+                // lần lưu trước (bác sĩ mở lại ca khám để kê thêm/sửa thuốc, vd sau khi có kết quả
+                // CLS), phải cập nhật lại ĐÚNG đơn đó thay vì tạo thêm 1 Prescription mới.
+                // [Old code]: luôn `_context.Prescriptions.Add(new Prescription {...})` — vi phạm
+                // UNIQUE và trả lỗi 500 ngay khi bác sĩ lưu lần 2 cho cùng 1 ca khám.
                 var insufficientStock = new List<string>();
                 if (dto.Prescriptions != null && dto.Prescriptions.Count > 0)
                 {
-                    var prescription = new Prescription
+                    var prescription = await _context.Prescriptions.FirstOrDefaultAsync(p => p.MedicalRecordId == record.MedicalRecordId);
+
+                    if (prescription != null && (prescription.Status == "Completed" || prescription.Status == "Dispensed"))
                     {
-                        MedicalRecordId = record.MedicalRecordId,
-                        DoctorId = dto.DoctorId,
-                        PatientId = dto.PatientId,
-                        Status = "Active",
-                        // [Old code]: Note = dto.TreatmentPlan,
-                        // [New code - Cột Note của đơn thuốc chỉ dùng riêng cho Ghi chú của Dược sĩ]:
-                        Note = null,
-                        CreatedAt = DateTime.UtcNow,
-                        UpdatedAt = DateTime.UtcNow
-                    };
-                    _context.Prescriptions.Add(prescription);
+                        return BadRequest(new { success = false, message = "Đơn thuốc của ca khám này đã được Dược sĩ phát thuốc, không thể chỉnh sửa lại." });
+                    }
+
+                    if (prescription == null)
+                    {
+                        prescription = new Prescription
+                        {
+                            MedicalRecordId = record.MedicalRecordId,
+                            DoctorId = dto.DoctorId,
+                            PatientId = dto.PatientId,
+                            Status = "Active",
+                            // [Old code]: Note = dto.TreatmentPlan,
+                            // [New code - Cột Note của đơn thuốc chỉ dùng riêng cho Ghi chú của Dược sĩ]:
+                            Note = null,
+                            CreatedAt = DateTime.UtcNow,
+                            UpdatedAt = DateTime.UtcNow
+                        };
+                        _context.Prescriptions.Add(prescription);
+                    }
+                    else
+                    {
+                        // Hoàn lại tồn kho của các dòng thuốc CŨ trước khi ghi đè bằng danh sách MỚI —
+                        // tránh trừ kho 2 lần cho cùng 1 thuốc khi bác sĩ chỉ sửa/thêm bớt vài dòng
+                        // trong đơn đã kê trước đó (form gửi lại toàn bộ danh sách, không phải delta).
+                        var oldDetails = await _context.PrescriptionDetails.Where(d => d.PrescriptionId == prescription.PrescriptionId).ToListAsync();
+                        foreach (var oldDetail in oldDetails)
+                        {
+                            var oldMed = await _context.Medicines.FirstOrDefaultAsync(m => m.MedicineId == oldDetail.MedicineId);
+                            if (oldMed != null) oldMed.StockQuantity += oldDetail.Quantity;
+                        }
+                        _context.PrescriptionDetails.RemoveRange(oldDetails);
+                        prescription.UpdatedAt = DateTime.UtcNow;
+                    }
                     await _context.SaveChangesAsync();
 
                     foreach (var pItem in dto.Prescriptions)
@@ -721,7 +799,19 @@ namespace DTT_Backend_API.Controllers
                 var recordIds = records.Select(r => r.MedicalRecordId).ToList();
 
                 var prescriptions = await _context.Prescriptions.AsNoTracking().Where(p => recordIds.Contains(p.MedicalRecordId)).ToListAsync();
-                var rxMap = prescriptions.ToDictionary(p => p.MedicalRecordId, p => p);
+                // [Old code]: var rxMap = prescriptions.ToDictionary(p => p.MedicalRecordId, p => p);
+                // [New code - Một medical_record có thể có NHIỀU Prescription (bác sĩ kê thêm đơn sau khi
+                // có kết quả CLS — xem chú thích tương tự ở POST {appointmentId}/dispense bên dưới).
+                // ToDictionary 1-1 theo MedicalRecordId từng CRASH (duplicate key) ngay khi có ≥2 đơn cho
+                // cùng 1 hồ sơ, khiến toàn bộ hàng đợi Dược sĩ lỗi 500. Nhóm theo MedicalRecordId và chỉ
+                // giữ các đơn CHƯA phát (không phải Completed/Dispensed) để khớp đúng tập hợp mà endpoint
+                // /dispense sẽ xử lý (phát HẾT các đơn chưa hoàn tất của hồ sơ) khi Dược sĩ bấm xác nhận —
+                // trước đây chỉ lấy đại 1 đơn nên Dược sĩ chỉ thấy 1 phần thuốc trong khi bấm xác nhận lại
+                // phát luôn cả các đơn không hề hiển thị trên màn hình.
+                var rxByRecord = prescriptions
+                    .Where(p => p.Status != "Completed" && p.Status != "Dispensed")
+                    .GroupBy(p => p.MedicalRecordId)
+                    .ToDictionary(g => g.Key, g => g.OrderBy(p => p.CreatedAt).ToList());
                 var rxIds = prescriptions.Select(p => p.PrescriptionId).ToList();
 
                 var allDetails = await _context.PrescriptionDetails.AsNoTracking().Where(d => rxIds.Contains(d.PrescriptionId)).ToListAsync();
@@ -742,10 +832,16 @@ namespace DTT_Backend_API.Controllers
                 foreach (var appt in appointments)
                 {
                     if (!recordMap.TryGetValue(appt.AppointmentId, out var record)) continue;
-                    if (!rxMap.TryGetValue(record.MedicalRecordId, out var rx)) continue;
+                    if (!rxByRecord.TryGetValue(record.MedicalRecordId, out var rxGroup) || rxGroup.Count == 0) continue;
 
-                    detailsGroup.TryGetValue(rx.PrescriptionId, out var details);
-                    if (details == null) details = new List<PrescriptionDetail>();
+                    // Gộp thuốc từ TOÀN BỘ đơn còn Pending của hồ sơ này (không chỉ đơn đầu tiên) — xem
+                    // chú thích ở rxByRecord phía trên.
+                    var rx = rxGroup[0];
+                    var details = new List<PrescriptionDetail>();
+                    foreach (var rxItem in rxGroup)
+                    {
+                        if (detailsGroup.TryGetValue(rxItem.PrescriptionId, out var dList)) details.AddRange(dList);
+                    }
 
                     patientMap.TryGetValue(appt.PatientId, out var pInfo);
                     string pName = pInfo?.FullName ?? "Bệnh nhân";
@@ -1000,38 +1096,50 @@ namespace DTT_Backend_API.Controllers
                     return NotFound(new { success = false, message = "Không tìm thấy hồ sơ bệnh án cho ca khám này." });
                 }
 
-                var rx = await _context.Prescriptions.FirstOrDefaultAsync(p => p.MedicalRecordId == record.MedicalRecordId);
-                if (rx == null)
+                // Một hồ sơ khám (medical_record) có thể có NHIỀU dòng Prescription (vd bác sĩ gọi lại
+                // CreateMedicalRecord để kê thêm thuốc sau lần đầu — mỗi lần gọi tạo 1 Prescription mới,
+                // không cập nhật đè lên đơn cũ). Trước đây "FirstOrDefaultAsync" chỉ lấy ĐẠI 1 đơn để
+                // phát thuốc rồi đánh dấu appointment Completed luôn — các đơn thuốc còn lại vĩnh viễn
+                // không được phát/không được đánh dấu, dù ca khám đã coi như xong. Giờ phát ĐỦ mọi đơn
+                // thuốc (chưa Completed/Dispensed) thuộc cùng hồ sơ khám này trong 1 lần bấm.
+                var rxList = await _context.Prescriptions
+                    .Where(p => p.MedicalRecordId == record.MedicalRecordId)
+                    .ToListAsync();
+                if (rxList.Count == 0)
                 {
                     return NotFound(new { success = false, message = "Không tìm thấy đơn thuốc cho ca khám này." });
                 }
 
-                // Cập nhật trạng thái đơn thuốc
-                // [Old code]: rx.Status = "Dispensed";
-                // [New code - Gán Completed phù hợp với PostgreSQL prescriptions_status_check]:
-                // [New code - Ghi nhận trực tiếp vào 2 cột dispensed_by, dispensed_at trong database]:
-                rx.Status = "Completed";
-                rx.DispensedBy = dto?.PharmacistUserId;
-                rx.DispensedAt = DateTime.UtcNow;
-                rx.UpdatedAt = DateTime.UtcNow;
-
-                string pName = !string.IsNullOrWhiteSpace(dto?.PharmacistName) 
-                    ? dto.PharmacistName.Trim() 
+                string pName = !string.IsNullOrWhiteSpace(dto?.PharmacistName)
+                    ? dto.PharmacistName.Trim()
                     : "DS. Trịnh Mai Phương";
 
-                if (!string.IsNullOrWhiteSpace(dto?.PharmacistNote))
+                foreach (var rx in rxList)
                 {
-                    rx.Note = string.IsNullOrEmpty(rx.Note)
-                        ? $"[{pName}]: {dto.PharmacistNote.Trim()}"
-                        : $"{rx.Note} | [{pName}]: {dto.PharmacistNote.Trim()}";
+                    if (rx.Status == "Completed" || rx.Status == "Dispensed") continue; // đơn đã phát từ trước, bỏ qua
+
+                    // Cập nhật trạng thái đơn thuốc
+                    // [Old code]: rx.Status = "Dispensed";
+                    // [New code - Gán Completed phù hợp với PostgreSQL prescriptions_status_check]:
+                    // [New code - Ghi nhận trực tiếp vào 2 cột dispensed_by, dispensed_at trong database]:
+                    rx.Status = "Completed";
+                    rx.DispensedBy = dto?.PharmacistUserId;
+                    rx.DispensedAt = DateTime.UtcNow;
+                    rx.UpdatedAt = DateTime.UtcNow;
+
+                    if (!string.IsNullOrWhiteSpace(dto?.PharmacistNote))
+                    {
+                        rx.Note = string.IsNullOrEmpty(rx.Note)
+                            ? $"[{pName}]: {dto.PharmacistNote.Trim()}"
+                            : $"{rx.Note} | [{pName}]: {dto.PharmacistNote.Trim()}";
+                    }
+                    else
+                    {
+                        rx.Note = string.IsNullOrEmpty(rx.Note)
+                            ? $"[Đã phát bởi {pName}]"
+                            : $"{rx.Note} | [Đã phát bởi {pName}]";
+                    }
                 }
-                else
-                {
-                    rx.Note = string.IsNullOrEmpty(rx.Note)
-                        ? $"[Đã phát bởi {pName}]"
-                        : $"{rx.Note} | [Đã phát bởi {pName}]";
-                }
-                rx.UpdatedAt = DateTime.UtcNow;
 
                 // Cập nhật cuộc hẹn sang StatusId = 4 (Completed)
                 var appt = await _context.Appointments.FirstOrDefaultAsync(a => a.AppointmentId == appointmentId);
@@ -1047,7 +1155,8 @@ namespace DTT_Backend_API.Controllers
                 {
                     success = true,
                     message = "Xác nhận phát thuốc thành công!",
-                    prescriptionId = rx.PrescriptionId
+                    prescriptionId = rxList[0].PrescriptionId,
+                    prescriptionIds = rxList.Select(r => r.PrescriptionId).ToList()
                 });
             }
             catch (Exception ex)

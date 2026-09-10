@@ -34,6 +34,15 @@ public static class AccessControl
         return principal.FindFirst("role_id")?.Value != "3";
     }
 
+    // Dành riêng cho các thao tác có thể LEO THANG ĐẶC QUYỀN (tạo/đổi RoleId tài khoản khác, vd
+    // UsersController.CreateUser/UpdateUser) — [StaffOnly] (IsStaff ở trên) chỉ loại trừ Bệnh nhân
+    // (role_id=3), nghĩa là MỌI nhân viên khác (Bác sĩ, Lễ tân, Điều dưỡng, KTV, Dược sĩ) đều gọi được,
+    // kể cả để tự phong mình/người khác thành Admin — chỉ chính Admin (role_id=1) mới được phép.
+    public static bool IsAdmin(ClaimsPrincipal principal)
+    {
+        return principal.FindFirst("role_id")?.Value == "1";
+    }
+
     // Dành cho các bản ghi gắn trực tiếp với users.user_id (vd: notifications) thay vì patients.patient_id.
     public static bool CanAccessUserId(ClaimsPrincipal principal, Guid targetUserId)
     {

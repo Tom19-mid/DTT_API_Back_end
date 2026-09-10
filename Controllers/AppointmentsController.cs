@@ -58,6 +58,18 @@ public class AppointmentsController : ControllerBase
                 return BadRequest(new { success = false, message = $"Không tìm thấy bệnh nhân với PatientId={dto.PatientId}." });
             int validPatientId = patient.PatientId;
 
+            // 2b. Nếu đặt lịch cho hồ sơ người thân (MemberId), xác thực hồ sơ đó thực sự thuộc về
+            // chính tài khoản đang gọi (OwnerPatientId == validPatientId) — không tin tưởng MemberId
+            // gửi lên tùy ý, tránh gán nhầm/cố ý gán lịch hẹn của mình cho hồ sơ người thân của tài
+            // khoản khác (member_id là số nguyên toàn cục, không tự động gắn với patientId).
+            FamilyMember? familyMember = null;
+            if (dto.MemberId.HasValue && dto.MemberId.Value > 0)
+            {
+                familyMember = await _context.FamilyMembers.FirstOrDefaultAsync(m => m.MemberId == dto.MemberId.Value);
+                if (familyMember == null || familyMember.OwnerPatientId != validPatientId)
+                    return BadRequest(new { success = false, message = "Hồ sơ người thân không hợp lệ hoặc không thuộc tài khoản này." });
+            }
+
             // 3. Xác thực bác sĩ tồn tại — tương tự, không fallback về "bác sĩ đầu tiên" nếu sai ID.
             var doctor = await _context.Doctors.FirstOrDefaultAsync(d => d.DoctorId == dto.DoctorId);
             if (doctor == null)
@@ -101,66 +113,76 @@ public class AppointmentsController : ControllerBase
                 var conn = _context.Database.GetDbConnection();
                 if (conn.State != ConnectionState.Open) await conn.OpenAsync();
 
+                // Một bác sĩ có thể có NHIỀU dòng doctor_schedules trong cùng 1 work_date (ca sáng + ca
+                // chiều tách rời, có khoảng nghỉ trưa ở giữa — đã xác nhận qua dữ liệu thật). Trước đây
+                // "LIMIT 1" chỉ lấy ĐẠI 1 dòng bất kỳ trong số đó — nếu dòng lấy được không phải đúng ca
+                // chứa giờ bệnh nhân chọn (vd lấy trúng ca sáng 08:00-12:00 trong khi bệnh nhân chọn giờ
+                // chiều 13:30), hệ thống báo nhầm "khung giờ không khả dụng" dù giờ đó vẫn nằm trong ca
+                // làm việc thật của bác sĩ hôm đó. Giờ lấy ĐỦ mọi dòng ca làm việc của đúng bác sĩ + đúng
+                // ngày để so khớp đúng ca.
                 using var schedCmd = conn.CreateCommand();
-                schedCmd.CommandText = "SELECT schedule_id, start_time, end_time FROM doctor_schedules WHERE doctor_id = @dId AND work_date = @wDate LIMIT 1";
+                schedCmd.CommandText = "SELECT schedule_id, start_time, end_time FROM doctor_schedules WHERE doctor_id = @dId AND work_date = @wDate ORDER BY start_time ASC";
                 var scP1 = schedCmd.CreateParameter(); scP1.ParameterName = "@dId"; scP1.Value = validDoctorId; schedCmd.Parameters.Add(scP1);
                 var scP2 = schedCmd.CreateParameter(); scP2.ParameterName = "@wDate"; scP2.Value = apptDate.Value.ToDateTime(TimeOnly.MinValue); schedCmd.Parameters.Add(scP2);
 
-                int scheduleId = 0;
-                TimeSpan schedStart = TimeSpan.Zero, schedEnd = TimeSpan.Zero;
+                var scheduleRows = new List<(int Id, TimeSpan Start, TimeSpan End)>();
                 using (var schedReader = await schedCmd.ExecuteReaderAsync())
                 {
-                    if (await schedReader.ReadAsync())
+                    while (await schedReader.ReadAsync())
                     {
-                        scheduleId = schedReader.GetInt32(0);
-                        schedStart = GetTimeSpanValue(schedReader, 1);
-                        schedEnd = GetTimeSpanValue(schedReader, 2);
+                        scheduleRows.Add((schedReader.GetInt32(0), GetTimeSpanValue(schedReader, 1), GetTimeSpanValue(schedReader, 2)));
                     }
                 }
 
-                if (scheduleId <= 0)
+                if (scheduleRows.Count == 0)
                     return BadRequest(new { success = false, message = "Bác sĩ không có lịch làm việc vào ngày đã chọn. Vui lòng chọn ngày/bác sĩ khác." });
+
+                // scheduleRows[].Id đều là số nguyên đọc lại từ chính DB (không phải input người dùng),
+                // ghép thẳng vào IN(...) an toàn — cùng cách các nơi khác trong file này đã dùng.
+                var scheduleIdsStr = string.Join(",", scheduleRows.Select(r => r.Id));
 
                 if (requestedStart.HasValue)
                 {
                     using var slotCmd = conn.CreateCommand();
-                    slotCmd.CommandText = @"
+                    slotCmd.CommandText = $@"
                         SELECT slot_id FROM doctor_schedule_slots
-                        WHERE schedule_id = @schedId AND status = 'Available' AND start_time = @sTime
+                        WHERE schedule_id IN ({scheduleIdsStr}) AND status = 'Available' AND start_time = @sTime
                           AND slot_id NOT IN (SELECT slot_id FROM appointments WHERE slot_id IS NOT NULL)
                         LIMIT 1";
-                    var slP1 = slotCmd.CreateParameter(); slP1.ParameterName = "@schedId"; slP1.Value = scheduleId; slotCmd.Parameters.Add(slP1);
                     var slP2 = slotCmd.CreateParameter(); slP2.ParameterName = "@sTime"; slP2.Value = requestedStart.Value; slotCmd.Parameters.Add(slP2);
                     var slotVal = await slotCmd.ExecuteScalarAsync();
                     if (slotVal != null && slotVal != DBNull.Value) slotId = Convert.ToInt32(slotVal);
 
                     // Chưa có slot 30' nào được sinh sẵn đúng giờ này (Web Admin/Lễ tân cho chọn tự do
                     // 08:00-22:00, không bị giới hạn theo các slot mobile đã sinh) — nếu giờ yêu cầu vẫn
-                    // nằm trong khung làm việc [start_time, end_time) của bác sĩ ngày hôm đó thì tự tạo
-                    // đúng slot đó thay vì từ chối một giờ hợp lệ.
-                    if (slotId <= 0 && requestedStart.Value >= schedStart && requestedStart.Value < schedEnd)
+                    // nằm trong khung làm việc [start_time, end_time) của ĐÚNG 1 CA của bác sĩ ngày hôm đó
+                    // thì tự tạo đúng slot đó (vào đúng schedule_id của ca đó) thay vì từ chối 1 giờ hợp lệ.
+                    if (slotId <= 0)
                     {
-                        using var insSlot = conn.CreateCommand();
-                        insSlot.CommandText = @"
-                            INSERT INTO doctor_schedule_slots (schedule_id, slot_order, start_time, end_time, status, created_at, updated_at)
-                            VALUES (@schedId, (SELECT COALESCE(MAX(slot_order), 0) + 1 FROM doctor_schedule_slots WHERE schedule_id = @schedId), @sTime, @eTime, 'Available', NOW(), NOW())
-                            RETURNING slot_id";
-                        var isP1 = insSlot.CreateParameter(); isP1.ParameterName = "@schedId"; isP1.Value = scheduleId; insSlot.Parameters.Add(isP1);
-                        var isP2 = insSlot.CreateParameter(); isP2.ParameterName = "@sTime"; isP2.Value = requestedStart.Value; insSlot.Parameters.Add(isP2);
-                        var isP3 = insSlot.CreateParameter(); isP3.ParameterName = "@eTime"; isP3.Value = requestedStart.Value.Add(TimeSpan.FromMinutes(30)); insSlot.Parameters.Add(isP3);
-                        var newSlotVal = await insSlot.ExecuteScalarAsync();
-                        if (newSlotVal != null && newSlotVal != DBNull.Value) slotId = Convert.ToInt32(newSlotVal);
+                        var matchingShift = scheduleRows.FirstOrDefault(r => requestedStart.Value >= r.Start && requestedStart.Value < r.End);
+                        if (matchingShift.Id > 0)
+                        {
+                            using var insSlot = conn.CreateCommand();
+                            insSlot.CommandText = @"
+                                INSERT INTO doctor_schedule_slots (schedule_id, slot_order, start_time, end_time, status, created_at, updated_at)
+                                VALUES (@schedId, (SELECT COALESCE(MAX(slot_order), 0) + 1 FROM doctor_schedule_slots WHERE schedule_id = @schedId), @sTime, @eTime, 'Available', NOW(), NOW())
+                                RETURNING slot_id";
+                            var isP1 = insSlot.CreateParameter(); isP1.ParameterName = "@schedId"; isP1.Value = matchingShift.Id; insSlot.Parameters.Add(isP1);
+                            var isP2 = insSlot.CreateParameter(); isP2.ParameterName = "@sTime"; isP2.Value = requestedStart.Value; insSlot.Parameters.Add(isP2);
+                            var isP3 = insSlot.CreateParameter(); isP3.ParameterName = "@eTime"; isP3.Value = requestedStart.Value.Add(TimeSpan.FromMinutes(30)); insSlot.Parameters.Add(isP3);
+                            var newSlotVal = await insSlot.ExecuteScalarAsync();
+                            if (newSlotVal != null && newSlotVal != DBNull.Value) slotId = Convert.ToInt32(newSlotVal);
+                        }
                     }
                 }
                 else
                 {
                     using var slotCmd = conn.CreateCommand();
-                    slotCmd.CommandText = @"
+                    slotCmd.CommandText = $@"
                         SELECT slot_id FROM doctor_schedule_slots
-                        WHERE schedule_id = @schedId AND status = 'Available'
+                        WHERE schedule_id IN ({scheduleIdsStr}) AND status = 'Available'
                           AND slot_id NOT IN (SELECT slot_id FROM appointments WHERE slot_id IS NOT NULL)
                         ORDER BY start_time ASC LIMIT 1";
-                    var slP1 = slotCmd.CreateParameter(); slP1.ParameterName = "@schedId"; slP1.Value = scheduleId; slotCmd.Parameters.Add(slP1);
                     var slotVal = await slotCmd.ExecuteScalarAsync();
                     if (slotVal != null && slotVal != DBNull.Value) slotId = Convert.ToInt32(slotVal);
                 }
@@ -187,6 +209,7 @@ public class AppointmentsController : ControllerBase
                 var appointment = new Appointment
                 {
                     PatientId = validPatientId,
+                    MemberId = familyMember?.MemberId,
                     DoctorId = validDoctorId,
                     SlotId = slotId,
                     Reason = dto.Reason ?? $"{dto.SpecialtyName} - {dto.Date} {dto.TimeSlot}",
@@ -212,11 +235,12 @@ public class AppointmentsController : ControllerBase
 
                     using var rawCmd = conn.CreateCommand();
                     rawCmd.CommandText = @"
-                        INSERT INTO appointments (patient_id, doctor_id, slot_id, reason, status_id, queue_number, note, appointment_date, created_at)
-                        VALUES (@pId, @dId, @sId, @reason, 1, @qNum, @note, @apptDate, NOW())
+                        INSERT INTO appointments (patient_id, member_id, doctor_id, slot_id, reason, status_id, queue_number, note, appointment_date, created_at)
+                        VALUES (@pId, @mId, @dId, @sId, @reason, 1, @qNum, @note, @apptDate, NOW())
                         RETURNING appointment_id";
 
                     var p1 = rawCmd.CreateParameter(); p1.ParameterName = "@pId"; p1.Value = validPatientId; rawCmd.Parameters.Add(p1);
+                    var pMember = rawCmd.CreateParameter(); pMember.ParameterName = "@mId"; pMember.Value = (object?)familyMember?.MemberId ?? DBNull.Value; rawCmd.Parameters.Add(pMember);
                     var p2 = rawCmd.CreateParameter(); p2.ParameterName = "@dId"; p2.Value = validDoctorId; rawCmd.Parameters.Add(p2);
                     var p3 = rawCmd.CreateParameter(); p3.ParameterName = "@sId"; p3.Value = slotId; rawCmd.Parameters.Add(p3);
                     var p4 = rawCmd.CreateParameter(); p4.ParameterName = "@reason"; p4.Value = (object?)dto.Reason ?? $"{dto.SpecialtyName} - {dto.Date} {dto.TimeSlot}"; rawCmd.Parameters.Add(p4);
@@ -236,13 +260,51 @@ public class AppointmentsController : ControllerBase
                 }
             }
 
+            // queueNum (tính trước lúc INSERT) chỉ là giá trị GỬI XUỐNG — cột appointments.queue_number
+            // thật sự có 1 TRIGGER CSDL (trg_set_queue_number, BEFORE INSERT) tự ý gán lại bằng
+            // slot_order của khung giờ đã chọn, ĐÈ LÊN giá trị C# vừa gửi. EF Core sau SaveChangesAsync
+            // không tự đọc lại giá trị đã bị trigger sửa (chỉ raw SQL INSERT ... RETURNING mới thấy được
+            // hàng thật sau trigger) — nếu không đọc lại, số thứ tự hiện trên modal "Đặt lịch thành công"
+            // (App Mobile) sẽ SAI/CŨ so với số thật lưu trong DB, dù mọi nơi khác (Lịch khám của tôi,
+            // Lễ Tân, Bác sĩ) đều query lại DB nên luôn thấy đúng số thật — gây lệch số giữa lúc vừa đặt
+            // xong và lúc xem lại ngay sau đó.
+            int finalQueueNum = queueNum;
+            if (newAppointmentId > 0)
+            {
+                try
+                {
+                    var conn = _context.Database.GetDbConnection();
+                    if (conn.State != ConnectionState.Open) await conn.OpenAsync();
+                    using var qCmd = conn.CreateCommand();
+                    qCmd.CommandText = "SELECT queue_number FROM appointments WHERE appointment_id = @id";
+                    var qP = qCmd.CreateParameter(); qP.ParameterName = "@id"; qP.Value = newAppointmentId; qCmd.Parameters.Add(qP);
+                    var qVal = await qCmd.ExecuteScalarAsync();
+                    if (qVal != null && qVal != DBNull.Value) finalQueueNum = Convert.ToInt32(qVal);
+                }
+                catch (Exception qEx)
+                {
+                    Console.WriteLine("Reload queue_number after insert failed: " + qEx.Message);
+                }
+            }
+
+            string respPatientName = familyMember != null
+                ? (familyMember.FullName ?? "Người thân")
+                : (patient?.FullName ?? $"Bệnh nhân #{validPatientId}");
+            string respPatientGender = familyMember != null
+                ? (!string.IsNullOrEmpty(familyMember.Gender) ? familyMember.Gender! : "Nam")
+                : (!string.IsNullOrEmpty(patient?.Gender) ? patient.Gender : "Nam");
+            int respPatientAge = familyMember?.DateOfBirth.HasValue == true
+                ? (int)((DateTime.UtcNow - familyMember.DateOfBirth!.Value).TotalDays / 365.25)
+                : (patient?.DateOfBirth.HasValue == true ? (int)((DateTime.UtcNow - patient.DateOfBirth.Value).TotalDays / 365.25) : 35);
+
             return Ok(new AppointmentResponseDto
             {
                 AppointmentId = newAppointmentId > 0 ? newAppointmentId : queueNum,
                 PatientId = validPatientId,
-                PatientName = patient?.FullName ?? $"Bệnh nhân #{validPatientId}",
-                PatientGender = !string.IsNullOrEmpty(patient?.Gender) ? patient.Gender : "Nam",
-                PatientAge = patient?.DateOfBirth.HasValue == true ? (int)((DateTime.UtcNow - patient.DateOfBirth.Value).TotalDays / 365.25) : 35,
+                MemberId = familyMember?.MemberId,
+                PatientName = respPatientName,
+                PatientGender = respPatientGender,
+                PatientAge = respPatientAge,
                 Reason = dto.Reason,
                 DoctorId = validDoctorId,
                 DoctorName = !string.IsNullOrEmpty(dto.DoctorName) ? dto.DoctorName : doctor?.FullName ?? "BS. CK1 Nguyễn Văn A",
@@ -250,7 +312,7 @@ public class AppointmentsController : ControllerBase
                 Date = !string.IsNullOrEmpty(dto.Date) ? dto.Date : DateTime.Now.ToString("dd/MM/yyyy"),
                 TimeSlot = !string.IsNullOrEmpty(dto.TimeSlot) ? dto.TimeSlot : "08:30 - 09:30",
                 Status = "Confirmed",
-                QueueNumber = queueNum,
+                QueueNumber = finalQueueNum,
                 ClinicRoom = doctor?.ClinicRoom ?? "Phòng 101",
                 Fee = dto.Fee ?? "250.000đ",
                 CreatedAt = DateTime.UtcNow
@@ -697,6 +759,15 @@ public class AppointmentsController : ControllerBase
         var patientIds = list.Select(a => a.PatientId).Distinct().ToList();
         var patients = await _context.Patients.AsNoTracking().Where(p => patientIds.Contains(p.PatientId)).ToDictionaryAsync(p => p.PatientId);
 
+        // Lịch hẹn đặt cho hồ sơ người thân (MemberId != null) phải hiển thị tên/giới tính/tuổi của
+        // NGƯỜI THÂN đó, không phải của chủ tài khoản — trước đây FormatAppointmentListAsync luôn lấy
+        // theo `patients[appt.PatientId]` (chủ tài khoản) dù cột member_id đã được lưu, khiến lễ tân/bác
+        // sĩ/bệnh nhân đều thấy nhầm tên người đặt lịch thay vì người thực sự đi khám.
+        var memberIds = list.Where(a => a.MemberId.HasValue).Select(a => a.MemberId!.Value).Distinct().ToList();
+        var familyMembers = memberIds.Count > 0
+            ? await _context.FamilyMembers.AsNoTracking().Where(m => memberIds.Contains(m.MemberId)).ToDictionaryAsync(m => m.MemberId)
+            : new Dictionary<int, FamilyMember>();
+
         var specialtyIds = doctors.Values.Where(d => d.SpecialtyId.HasValue).Select(d => d.SpecialtyId!.Value).Distinct().ToList();
         var specialties = await _context.Specialties.AsNoTracking().Where(s => specialtyIds.Contains(s.SpecialtyId)).ToDictionaryAsync(s => s.SpecialtyId);
 
@@ -746,12 +817,19 @@ public class AppointmentsController : ControllerBase
             Specialty? specialty = null;
             if (doctor?.SpecialtyId != null) specialties.TryGetValue(doctor.SpecialtyId.Value, out specialty);
 
-            string patientName = patient?.FullName ?? $"Bệnh nhân #{appt.PatientId}";
-            string patientGender = !string.IsNullOrEmpty(patient?.Gender) ? patient.Gender : "Nam";
+            FamilyMember? member = appt.MemberId.HasValue ? familyMembers.GetValueOrDefault(appt.MemberId.Value) : null;
+
+            string patientName = member != null
+                ? (member.FullName ?? "Người thân")
+                : (patient?.FullName ?? $"Bệnh nhân #{appt.PatientId}");
+            string patientGender = member != null
+                ? (!string.IsNullOrEmpty(member.Gender) ? member.Gender! : "Nam")
+                : (!string.IsNullOrEmpty(patient?.Gender) ? patient.Gender : "Nam");
             int patientAge = 0;
-            if (patient?.DateOfBirth.HasValue == true)
+            var patientDob = member?.DateOfBirth ?? patient?.DateOfBirth;
+            if (patientDob.HasValue)
             {
-                patientAge = (int)((DateTime.UtcNow - patient.DateOfBirth.Value).TotalDays / 365.25);
+                patientAge = (int)((DateTime.UtcNow - patientDob.Value).TotalDays / 365.25);
                 if (patientAge <= 0) patientAge = 0;
             }
 

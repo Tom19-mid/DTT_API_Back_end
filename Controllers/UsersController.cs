@@ -190,12 +190,13 @@ public class UsersController : ControllerBase
     }
 
     // POST /api/users — Tạo mới tài khoản người dùng
-    // Chỉ nhân viên y tế (Web Admin) được gọi endpoint này — cho phép chỉ định RoleId bất kỳ
-    // (kể cả Admin) nên nếu để bệnh nhân gọi được sẽ là lỗ hổng leo thang đặc quyền nghiêm
-    // trọng. Bệnh nhân tự đăng ký tài khoản qua AuthController.Register (/auth/register),
-    // KHÔNG BAO GIỜ qua endpoint này.
+    // Cho phép chỉ định RoleId bất kỳ (kể cả Admin) nên phải giới hạn CHỈ Admin mới gọi được — trước
+    // đây chỉ có [StaffOnly] (loại trừ mỗi Bệnh nhân), nghĩa là 1 tài khoản Bác sĩ/Lễ tân/Điều dưỡng/
+    // KTV/Dược sĩ bất kỳ vẫn tự tạo được tài khoản Admin mới cho chính họ — lỗ hổng leo thang đặc
+    // quyền nghiêm trọng (đã xác nhận qua rà soát thật). Bệnh nhân tự đăng ký tài khoản qua
+    // AuthController.Register (/auth/register), KHÔNG BAO GIỜ qua endpoint này.
     [HttpPost]
-    [StaffOnly]
+    [AdminOnly]
     public async Task<IActionResult> CreateUser([FromBody] CreateUserDto dto)
     {
         if (!ModelState.IsValid) return BadRequest(ModelState);
@@ -300,10 +301,11 @@ public class UsersController : ControllerBase
         }
     }
 
-    // PUT /api/users/{id} — Cập nhật thông tin tài khoản (bao gồm đổi RoleId) — chỉ nhân viên,
-    // vì trước đây bất kỳ ai đăng nhập cũng gọi được, kể cả tự đổi RoleId của chính mình lên Admin.
+    // PUT /api/users/{id} — Cập nhật thông tin tài khoản (bao gồm đổi RoleId) — CHỈ Admin, cùng lý do
+    // với CreateUser ở trên: [StaffOnly] trước đây vẫn cho phép 1 tài khoản Bác sĩ/Lễ tân/Điều dưỡng/
+    // KTV/Dược sĩ bất kỳ tự đổi RoleId của MỘT tài khoản khác (hoặc chính mình) lên Admin.
     [HttpPut("{id}")]
-    [StaffOnly]
+    [AdminOnly]
     public async Task<IActionResult> UpdateUser(Guid id, [FromBody] UpdateUserDto dto)
     {
         try
