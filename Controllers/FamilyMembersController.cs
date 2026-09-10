@@ -266,6 +266,13 @@ public class FamilyMembersController : ControllerBase
                 if (dto.Address != null) member.Address = dto.Address;
                 if (TryParseDate(dto.Dob, out var parsedMemberDob)) member.DateOfBirth = parsedMemberDob;
 
+                // CanAccessPatientAsync ở trên cho phép CẢ chủ tài khoản gọi (không chỉ nhân viên) —
+                // nếu không chặn riêng ở đây, chủ tài khoản có thể tự gửi VerificationStatus="verified"
+                // qua chính API cập nhật hồ sơ này, bỏ qua hoàn toàn bước Lễ Tân đối chiếu CCCD thật ở
+                // VerifyFamilyMember (PATCH /{id}/verify). Chỉ nhân viên mới được đổi trạng thái xác thực.
+                if (!string.IsNullOrWhiteSpace(dto.VerificationStatus) && !AccessControl.IsStaff(User))
+                    return this.ForbidJson("Chỉ nhân viên mới có quyền thay đổi trạng thái xác thực CCCD.");
+
                 if (!string.IsNullOrWhiteSpace(dto.VerificationStatus))
                 {
                     var v = dto.VerificationStatus.Trim().ToLower();

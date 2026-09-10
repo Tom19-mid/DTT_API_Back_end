@@ -254,7 +254,10 @@ public class PatientsController : ControllerBase
     }
 
     // POST /api/patients — Tạo mới hồ sơ bệnh nhân từ Web Admin
+    // [StaffOnly] — phát hiện thêm khi rà soát lần 2, cùng dạng lỗi với UpdatePatient ở trên: trước đây
+    // không kiểm tra quyền, bất kỳ ai đăng nhập cũng tạo được hồ sơ bệnh nhân tùy ý.
     [HttpPost]
+    [StaffOnly]
     public async Task<IActionResult> CreatePatient([FromBody] CreatePatientAdminDto dto)
     {
         try
@@ -368,7 +371,12 @@ public class PatientsController : ControllerBase
     }
 
     // PUT /api/patients/{id} — Cập nhật hồ sơ bệnh nhân từ Web Admin
+    // [StaffOnly] — endpoint này cho phép đổi VerificationStatus trực tiếp (bỏ qua bước Lễ Tân đối
+    // chiếu CCCD thật ở VerifyPatient/VerifyFamilyMember), và không hề kiểm tra chủ sở hữu, nên nếu để
+    // bệnh nhân (role_id=3) gọi được sẽ là lỗ hổng IDOR + tự-xác-thực nghiêm trọng: bất kỳ ai đăng nhập
+    // cũng sửa được hồ sơ của người khác (CCCD, SĐT, ngày sinh...) và tự đặt verified cho chính mình.
     [HttpPut("{id}")]
+    [StaffOnly]
     public async Task<IActionResult> UpdatePatient(int id, [FromBody] UpdatePatientAdminDto dto)
     {
         try

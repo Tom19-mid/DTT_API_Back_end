@@ -109,11 +109,6 @@ public class HealthPackagesController : ControllerBase
             if (pkg == null)
                 return NotFound(new { message = "Không tìm thấy gói khám." });
 
-            // Increment booked count
-            pkg.BookedCount += 1;
-            pkg.UpdatedAt = DateTime.UtcNow;
-            try { await _context.SaveChangesAsync(); } catch { }
-
             // 1. Ensure appointment_statuses table has entries
             var statusCount = await _context.AppointmentStatuses.CountAsync();
             if (statusCount == 0)
@@ -296,6 +291,14 @@ public class HealthPackagesController : ControllerBase
 
             if (validSlotId == 0)
                 return BadRequest(new { success = false, message = "Không thể khởi tạo khung giờ khám cho gói dịch vụ." });
+
+            // Tăng số lượt đặt CHỈ sau khi đã qua hết các bước xác thực có thể BadRequest ở trên (gói
+            // không tồn tại, bệnh nhân/người thân không hợp lệ, sai giới tính, không có bác sĩ/slot phù
+            // hợp) — trước đây tăng ngay từ đầu hàm, nên mọi lượt đặt THẤT BẠI cũng làm BookedCount (hiển
+            // thị công khai cho bệnh nhân khác) tăng lên sai lệch.
+            pkg.BookedCount += 1;
+            pkg.UpdatedAt = DateTime.UtcNow;
+            try { await _context.SaveChangesAsync(); } catch { }
 
             // 6. Create appointment record
             // Số thứ tự hàng đợi phải tính theo hàng đợi THẬT của bác sĩ trong ngày khám đó

@@ -246,7 +246,10 @@ public class InvoicesController : ControllerBase
             items.Add(new InvoiceItem
             {
                 InvoiceId = invoice.InvoiceId,
-                ItemName = "Công khám lâm sàng chuyên khoa",
+                // Trước đây hardcode "Công khám lâm sàng chuyên khoa" kể cả khi isPackage=true — sai lệch
+                // với đúng tên dùng ở SyncInvoiceItems/CapturePaypalOrder, khiến hóa đơn tiền mặt của lịch
+                // hẹn theo gói khám in/lưu nhầm tên hạng mục (không ảnh hưởng số tiền).
+                ItemName = isPackage ? "Trọn gói khám sức khỏe" : "Công khám lâm sàng chuyên khoa",
                 ItemType = "exam",
                 Quantity = 1,
                 UnitPrice = examFee,
@@ -576,8 +579,19 @@ public class InvoicesController : ControllerBase
 
                         if (scId == 0)
                         {
+                            // [Old code]: INSERT thẳng, không xử lý xung đột — 2 lễ tân đăng ký vãng lai cùng
+                            // lúc cho cùng 1 bác sĩ/cùng ngày (chưa có schedule nào) sẽ đụng UNIQUE
+                            // (doctor_id, work_date, start_time), 1 request thua cuộc bị exception, rơi vào
+                            // catch bên dưới, validSlotId=0 mãi mãi cho request đó.
+                            // [New code]: ON CONFLICT DO UPDATE (upsert vô hại) để LUÔN lấy được đúng
+                            // schedule_id dù có request khác vừa tạo trước, không phụ thuộc thắng/thua race.
                             using var schedCmd = conn.CreateCommand();
-                            schedCmd.CommandText = "INSERT INTO doctor_schedules (doctor_id, work_date, start_time, end_time) VALUES (@docId, CURRENT_DATE, '08:00:00', '17:00:00') RETURNING schedule_id";
+                            schedCmd.CommandText = @"
+                                INSERT INTO doctor_schedules (doctor_id, work_date, start_time, end_time)
+                                VALUES (@docId, CURRENT_DATE, '08:00:00', '17:00:00')
+                                ON CONFLICT (doctor_id, work_date, start_time)
+                                DO UPDATE SET updated_at = CURRENT_TIMESTAMP
+                                RETURNING schedule_id";
                             var pDoc3 = schedCmd.CreateParameter(); pDoc3.ParameterName = "@docId"; pDoc3.Value = dto.DoctorId; schedCmd.Parameters.Add(pDoc3);
                             var scRes = await schedCmd.ExecuteScalarAsync();
                             if (scRes != null && scRes != DBNull.Value) scId = Convert.ToInt32(scRes);
@@ -585,12 +599,27 @@ public class InvoicesController : ControllerBase
 
                         if (scId > 0)
                         {
-                            // Tính slot_order kế tiếp thay vì hardcode 1 — tránh đụng UNIQUE (schedule_id, slot_order)
-                            // khi schedule đó đã có sẵn slot từ lần đăng ký trước.
+                            // [Old code]: start_time luôn hardcode '08:00:00' — chỉ tính slot_order động, quên
+                            // rằng doctor_schedule_slots CŨNG có UNIQUE (schedule_id, start_time) (dùng bởi
+                            // chính WorkSchedulesController ở nơi khác). Kết quả: NGAY BỆNH NHÂN VÃNG LAI THỨ 2
+                            // trong ngày của CÙNG 1 bác sĩ (không cần đúng lúc, chỉ cần tuần tự) luôn đụng
+                            // constraint này vì slot thứ 1 đã chiếm mất start_time '08:00:00' của schedule đó.
+                            // [New code]: lệch start_time theo slot_order (mỗi slot vãng lai cách nhau 1 phút
+                            // giả lập, không phải giờ hẹn thật) để luôn duy nhất trong cùng 1 schedule_id, và
+                            // dùng ON CONFLICT DO UPDATE để an toàn cả khi có request khác chạy song song.
                             using var insSlot = conn.CreateCommand();
                             insSlot.CommandText = @"
+                                WITH next_order AS (
+                                    SELECT COALESCE(MAX(slot_order), 0) + 1 AS ord
+                                    FROM doctor_schedule_slots WHERE schedule_id = @scId
+                                )
                                 INSERT INTO doctor_schedule_slots (schedule_id, slot_order, start_time, end_time, status)
-                                VALUES (@scId, (SELECT COALESCE(MAX(slot_order), 0) + 1 FROM doctor_schedule_slots WHERE schedule_id = @scId), '08:00:00', '17:00:00', 'Available')
+                                SELECT @scId, ord,
+                                       ('08:00:00'::time + (ord - 1) * interval '1 minute'),
+                                       ('08:00:00'::time + ord * interval '1 minute'),
+                                       'Available'
+                                FROM next_order
+                                ON CONFLICT (schedule_id, start_time) DO NOTHING
                                 RETURNING slot_id";
                             var pSc = insSlot.CreateParameter(); pSc.ParameterName = "@scId"; pSc.Value = scId; insSlot.Parameters.Add(pSc);
                             var slRes = await insSlot.ExecuteScalarAsync();
@@ -601,6 +630,18 @@ public class InvoicesController : ControllerBase
                 catch (Exception ex)
                 {
                     Console.WriteLine("RegisterWalkIn slot lookup exception: " + ex.Message);
+                }
+
+                // Nếu vẫn không lấy được slot hợp lệ (lỗi DB thật, hoặc ON CONFLICT DO NOTHING đụng đúng
+                // lúc 1 request khác đang insert cùng slot_order) — KHÔNG được âm thầm tạo appointment với
+                // slot_id=NULL: trigger trg_set_queue_number RAISE EXCEPTION 'Invalid slot.' bất cứ khi nào
+                // slot_id NULL (đã xác nhận qua definition thật của function set_queue_number), nên insert
+                // chắc chắn thất bại ở bước dưới và trước đây bị nuốt lỗi, trả về "success" giả với
+                // appointmentId=0. Báo lỗi rõ ràng ngay tại đây để Lễ Tân biết cần thử lại, thay vì tạo hồ
+                // sơ bệnh nhân xong rồi âm thầm không có lịch hẹn nào đi kèm.
+                if (validSlotId == 0)
+                {
+                    return BadRequest(new { success = false, message = "Không thể xếp khung giờ khám cho bác sĩ này lúc này (có thể do trùng thời điểm với 1 lễ tân khác đang đăng ký). Vui lòng thử lại." });
                 }
 
                 var todayVn = todayVnForSlot;
@@ -744,6 +785,9 @@ public class InvoicesController : ControllerBase
     [HttpGet("vietqr/{appointmentId}")]
     public async Task<IActionResult> GetVietQrInfo(int appointmentId)
     {
+        // Trước đây không kiểm tra quyền — lộ số tiền/tên bệnh nhân của bất kỳ lịch hẹn nào cho bất kỳ
+        // ai đăng nhập nếu đoán đúng appointmentId.
+        if (!await AccessControl.CanAccessAppointmentAsync(User, _context, appointmentId)) return this.ForbidJson();
         try
         {
             var appt = await _context.Appointments.FirstOrDefaultAsync(a => a.AppointmentId == appointmentId);
@@ -1470,6 +1514,8 @@ public class InvoicesController : ControllerBase
     [HttpGet("status/{appointmentId}")]
     public async Task<IActionResult> GetPaymentStatus(int appointmentId)
     {
+        // Trước đây không kiểm tra quyền — lộ trạng thái thanh toán/số tiền của bất kỳ lịch hẹn nào.
+        if (!await AccessControl.CanAccessAppointmentAsync(User, _context, appointmentId)) return this.ForbidJson();
         try
         {
             var invoice = await _context.Invoices.FirstOrDefaultAsync(i => i.AppointmentId == appointmentId);

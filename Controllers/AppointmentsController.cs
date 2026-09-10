@@ -412,6 +412,11 @@ public class AppointmentsController : ControllerBase
     [HttpGet("{id:int}")]
     public async Task<IActionResult> GetAppointmentById(int id)
     {
+        // Trước đây không kiểm tra quyền gì cả — bất kỳ ai đăng nhập cũng xem được tên/lý do khám/
+        // ghi chú của bất kỳ lịch hẹn nào nếu biết đúng id (IDOR). Áp dụng đúng quy tắc như
+        // GetPatientAppointments ở trên: bệnh nhân chỉ xem được lịch hẹn của chính mình, nhân viên xem
+        // được mọi lịch hẹn.
+        if (!await AccessControl.CanAccessAppointmentAsync(User, _context, id)) return this.ForbidJson();
         try
         {
             var appt = await _context.Appointments.FirstOrDefaultAsync(a => a.AppointmentId == id);
@@ -1102,6 +1107,42 @@ public class AppointmentsController : ControllerBase
             if (appt != null)
             {
                 string status = req?.Status ?? "Confirmed";
+
+                // Trước đây if-chain dưới đây chỉ khớp đúng 5 literal ("Completed"/"Cancelled"/
+                // "InProgress"/"CheckedIn"/"NoShow", hoặc số StatusId tương ứng) — mọi giá trị khác
+                // (kể cả tên trạng thái THẬT trong appointment_statuses như "Waiting",
+                // "WaitingForDoctor", "AwaitingTestResults", "PendingDispensing", hoặc các alias Web
+                // Admin đang dùng "WaitingDoctor"/"WaitingTestResults") đều rơi vào nhánh else cuối,
+                // ÂM THẦM ghi đè StatusId về 1 (Scheduled) nhưng vẫn trả về success:true — Web Admin đổi
+                // trạng thái "Đang chờ phát thuốc"/"Đang chờ bác sĩ" tưởng thành công nhưng lịch hẹn bị
+                // reset ngược lại Scheduled, sai lệch với WinForms/Mobile. Giờ tra cứu đúng StatusId từ
+                // chính bảng appointment_statuses (không hardcode), chấp nhận cả alias đã biết, và báo
+                // lỗi rõ ràng nếu không khớp được trạng thái nào thay vì âm thầm reset.
+                string NormalizeStatusAlias(string s) => s switch
+                {
+                    "WaitingDoctor" => "WaitingForDoctor",
+                    "WaitingTestResults" => "AwaitingTestResults",
+                    "Confirmed" => "Scheduled",
+                    _ => s
+                };
+                string normalizedStatus = NormalizeStatusAlias(status.Trim());
+                var statusRow = await _context.AppointmentStatuses
+                    .FirstOrDefaultAsync(s => s.StatusName.ToLower() == normalizedStatus.ToLower());
+                int? resolvedStatusId = statusRow?.StatusId;
+                if (resolvedStatusId == null && int.TryParse(status.Trim(), out int numericStatusId))
+                {
+                    // Xác nhận numericStatusId THẬT SỰ tồn tại trong appointment_statuses trước khi chấp
+                    // nhận — nếu chỉ TryParse rồi gán thẳng, 1 số bất kỳ (vd id không tồn tại) sẽ vi phạm
+                    // FK appointments.status_id lúc SaveChangesAsync, ném lỗi 500 khó hiểu thay vì 400
+                    // rõ ràng ngay tại đây.
+                    bool numericIdExists = await _context.AppointmentStatuses.AnyAsync(s => s.StatusId == numericStatusId);
+                    if (numericIdExists) resolvedStatusId = numericStatusId;
+                }
+                if (resolvedStatusId == null)
+                    return BadRequest(new { success = false, message = $"Trạng thái '{status}' không hợp lệ." });
+
+                appt.StatusId = resolvedStatusId.Value;
+
                 var patient = await _context.Patients.FirstOrDefaultAsync(p => p.PatientId == appt.PatientId);
                 Guid targetUserId = patient?.UserId ?? Guid.Empty;
 
@@ -1181,10 +1222,11 @@ public class AppointmentsController : ControllerBase
                         });
                     }
                 }
-                else
-                {
-                    appt.StatusId = 1; // 1 = Scheduled / Confirmed
-                }
+                // [Old code]: else { appt.StatusId = 1; } — luôn ghi đè về Scheduled cho MỌI trạng thái
+                // không nằm trong 5 nhánh trên (Waiting, WaitingForDoctor, AwaitingTestResults,
+                // PendingDispensing...), chính là nguyên nhân gây reset sai. Đã bỏ nhánh else này —
+                // appt.StatusId đã được gán đúng bằng resolvedStatusId ở trên cho MỌI trạng thái hợp lệ,
+                // 5 nhánh if/else if bên trên giờ chỉ còn tác dụng gửi đúng loại thông báo tương ứng.
                 await _context.SaveChangesAsync();
                 return Ok(new { success = true, message = $"Cập nhật trạng thái thành [{status}] trực tiếp vào CSDL." });
             }

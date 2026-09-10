@@ -556,6 +556,12 @@ namespace DTT_Backend_API.Controllers
         {
             try
             {
+                // Trả về chẩn đoán + toàn bộ đơn thuốc của ca khám này — trước đây KHÔNG kiểm tra quyền
+                // gì cả, khiến bất kỳ ai đăng nhập (kể cả 1 bệnh nhân khác) cũng xem được hồ sơ bệnh án
+                // của người khác nếu biết đúng appointmentId (lộ dữ liệu y tế nhạy cảm - IDOR).
+                if (!await AccessControl.CanAccessAppointmentAsync(User, _context, appointmentId))
+                    return this.ForbidJson();
+
                 var record = await _context.MedicalRecords
                     .FirstOrDefaultAsync(r => r.AppointmentId == appointmentId);
 
@@ -586,8 +592,11 @@ namespace DTT_Backend_API.Controllers
             }
         }
 
-        // POST /api/MedicalRecords
+        // POST /api/MedicalRecords — Bác sĩ ghi nhận bệnh án + kê đơn thuốc (trừ tồn kho thuốc thật).
+        // [StaffOnly] — trước đây không kiểm tra quyền gì cả: bất kỳ ai đăng nhập cũng ghi được bệnh án
+        // giả cho bất kỳ lịch hẹn nào và trừ kho thuốc thật, một lỗ hổng giả mạo hồ sơ y tế nghiêm trọng.
         [HttpPost]
+        [StaffOnly]
         public async Task<IActionResult> CreateMedicalRecord([FromBody] CreateMedicalRecordDto dto)
         {
             if (dto == null)
@@ -764,7 +773,10 @@ namespace DTT_Backend_API.Controllers
         // =========================================================================
 
         // [New code - GET /api/MedicalRecords/pharmacy-queue: Tối ưu hóa truy vấn hàng loạt (Bulk Query) siêu tốc]:
+        // [StaffOnly] — trước đây không kiểm tra quyền, lộ CCCD/SĐT/BHYT/chẩn đoán của mọi bệnh nhân
+        // đang chờ phát thuốc cho bất kỳ ai đăng nhập, kể cả bệnh nhân khác.
         [HttpGet("pharmacy-queue")]
+        [StaffOnly]
         public async Task<IActionResult> GetPharmacyQueue([FromQuery] bool todayOnly = true)
         {
             try
@@ -906,7 +918,10 @@ namespace DTT_Backend_API.Controllers
         // =========================================================================
 
         // [New code - GET /api/MedicalRecords/pharmacy-history: Tìm kiếm thông minh theo SĐT, Họ tên, Mã đơn, Bác sĩ, Triệu chứng...]:
+        // [StaffOnly] — cùng lý do với pharmacy-queue ở trên: lộ lịch sử cấp phát thuốc/chẩn đoán của
+        // mọi bệnh nhân nếu không kiểm tra quyền.
         [HttpGet("pharmacy-history")]
+        [StaffOnly]
         public async Task<IActionResult> GetPharmacyHistory([FromQuery] string? date, [FromQuery] string? search)
         {
             try
@@ -1085,7 +1100,10 @@ namespace DTT_Backend_API.Controllers
         }
 
     // POST /api/MedicalRecords/{appointmentId}/dispense
+    // [StaffOnly] — trước đây không kiểm tra quyền, bất kỳ ai đăng nhập cũng đánh dấu "đã phát thuốc"
+    // được cho bất kỳ lịch hẹn nào (kể cả chưa thực sự phát), sai lệch tồn kho/trách nhiệm Dược sĩ.
         [HttpPost("{appointmentId}/dispense")]
+        [StaffOnly]
         public async Task<IActionResult> DispensePrescription(int appointmentId, [FromBody] DispenseDto dto)
         {
             try

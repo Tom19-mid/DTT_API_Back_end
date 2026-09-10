@@ -3,6 +3,7 @@ using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using DTT_Backend_API.Data;
 using DTT_Backend_API.Models;
+using DTT_Backend_API.Helpers;
 
 namespace DTT_Backend_API.Controllers;
 
@@ -325,7 +326,10 @@ public class DoctorsController : ControllerBase
     }
 
     // POST /api/doctors — Tạo mới Bác sĩ
+    // [StaffOnly] — phát hiện thêm khi rà soát toàn bộ Controller lần 2: trước đây không có bất kỳ
+    // kiểm tra quyền nào, bất kỳ ai đăng nhập (kể cả bệnh nhân) cũng tạo được hồ sơ Bác sĩ giả.
     [HttpPost]
+    [StaffOnly]
     public async Task<IActionResult> CreateDoctor([FromBody] DTT_Backend_API.DTOs.CreateDoctorDto dto)
     {
         if (!ModelState.IsValid) return BadRequest(ModelState);
@@ -454,7 +458,10 @@ public class DoctorsController : ControllerBase
     }
 
     // PUT /api/doctors/{id} — Cập nhật thông tin Bác sĩ
+    // [StaffOnly] — trước đây không kiểm tra quyền, bất kỳ ai đăng nhập cũng sửa được hồ sơ bất kỳ
+    // Bác sĩ nào.
     [HttpPut("{id}")]
+    [StaffOnly]
     public async Task<IActionResult> UpdateDoctor(int id, [FromBody] DTT_Backend_API.DTOs.UpdateDoctorDto dto)
     {
         try
@@ -625,7 +632,10 @@ public class DoctorsController : ControllerBase
     }
 
     // PUT /api/doctors/{id}/status — Cập nhật trạng thái/Khóa Bác sĩ
+    // [StaffOnly] — trước đây không kiểm tra quyền, bất kỳ ai đăng nhập cũng khóa/mở khóa được bất kỳ
+    // Bác sĩ nào.
     [HttpPut("{id}/status")]
+    [StaffOnly]
     public async Task<IActionResult> UpdateDoctorStatus(int id, [FromBody] DTT_Backend_API.DTOs.UpdateDoctorStatusDto dto)
     {
         try

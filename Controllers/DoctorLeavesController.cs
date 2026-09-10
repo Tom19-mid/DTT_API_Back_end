@@ -138,7 +138,10 @@ public class DoctorLeavesController : ControllerBase
     }
 
     // GET /api/doctors/leaves — Lấy danh sách tất cả đơn xin nghỉ phép
+    // [StaffOnly] — trước đây không kiểm tra quyền, lộ SĐT bác sĩ + lý do nghỉ phép cho bất kỳ ai
+    // đăng nhập, kể cả bệnh nhân (không dùng endpoint này).
     [HttpGet]
+    [StaffOnly]
     public async Task<IActionResult> GetLeaves([FromQuery] string? status)
     {
         try
@@ -243,31 +246,7 @@ public class DoctorLeavesController : ControllerBase
                         if (user != null) user.Status = "OnLeave";
 
                         // Giữ nguyên lịch trong CSDL, chỉ cập nhật trạng thái lịch làm việc (doctor_schedules/slots) sang 'Off'
-                        try
-                        {
-                            var conn = _context.Database.GetDbConnection();
-                            if (conn.State != ConnectionState.Open) await conn.OpenAsync();
-                            using var updCmd = conn.CreateCommand();
-                            updCmd.CommandText = @"
-                                UPDATE doctor_schedule_slots 
-                                SET status = 'Off'
-                                WHERE schedule_id IN (
-                                    SELECT schedule_id FROM doctor_schedules 
-                                    WHERE doctor_id = @docId AND work_date BETWEEN @sDate AND @eDate
-                                );
-                                UPDATE doctor_schedules 
-                                SET status = 'Off'
-                                WHERE doctor_id = @docId AND work_date BETWEEN @sDate AND @eDate;
-                            ";
-                            var p1 = updCmd.CreateParameter(); p1.ParameterName = "@docId"; p1.Value = leave.DoctorId; updCmd.Parameters.Add(p1);
-                            var p2 = updCmd.CreateParameter(); p2.ParameterName = "@sDate"; p2.Value = leave.LeaveStartDate.ToDateTime(TimeOnly.MinValue); updCmd.Parameters.Add(p2);
-                            var p3 = updCmd.CreateParameter(); p3.ParameterName = "@eDate"; p3.Value = leave.LeaveEndDate.ToDateTime(TimeOnly.MinValue); updCmd.Parameters.Add(p3);
-                            await updCmd.ExecuteNonQueryAsync();
-                        }
-                        catch (Exception schedEx)
-                        {
-                            Console.WriteLine($"[UpdateLeaveStatus Warning] Không thể cập nhật status doctor_schedules: {schedEx.Message}");
-                        }
+                        await CloseDoctorSchedulesAsync(leave.DoctorId, leave.LeaveStartDate, leave.LeaveEndDate, "UpdateLeaveStatus");
                     }
                     else if (newDbStatus == "Rejected" || newDbStatus == "Cancelled")
                     {
@@ -374,6 +353,15 @@ public class DoctorLeavesController : ControllerBase
             _context.DoctorLeaves.Add(newLeave);
             await _context.SaveChangesAsync();
 
+            // [New code]: trước đây tạo đơn nghỉ phép Ở TRẠNG THÁI "Approved" NGAY TỪ ĐẦU (không qua
+            // UpdateLeaveStatus) hoàn toàn không đóng doctor_schedules/doctor_schedule_slots — các khung
+            // giờ Available có sẵn của bác sĩ trong khoảng nghỉ vẫn đặt được bình thường dù bác sĩ đã
+            // được đánh dấu OnLeave. Dùng lại đúng logic đóng lịch của UpdateLeaveStatus.
+            if (dbStatus == "Approved")
+            {
+                await CloseDoctorSchedulesAsync(dto.DoctorId, startDate, endDate, "CreateLeave");
+            }
+
             return Ok(new
             {
                 success = true,
@@ -384,6 +372,38 @@ public class DoctorLeavesController : ControllerBase
         catch (Exception ex)
         {
             return StatusCode(500, new { message = "Lỗi khi tạo đơn xin nghỉ phép.", error = ex.Message });
+        }
+    }
+
+    // Đóng lịch làm việc (doctor_schedules/doctor_schedule_slots -> 'Off') cho đúng bác sĩ trong khoảng
+    // ngày nghỉ phép — dùng chung cho cả CreateLeave (khi tạo đơn ở trạng thái Approved ngay từ đầu) và
+    // UpdateLeaveStatus (khi duyệt 1 đơn đang Pending), tránh lặp lại 2 nơi rồi lệch nhau như trước đây.
+    private async Task CloseDoctorSchedulesAsync(int doctorId, DateOnly startDate, DateOnly endDate, string callerTag)
+    {
+        try
+        {
+            var conn = _context.Database.GetDbConnection();
+            if (conn.State != ConnectionState.Open) await conn.OpenAsync();
+            using var updCmd = conn.CreateCommand();
+            updCmd.CommandText = @"
+                UPDATE doctor_schedule_slots
+                SET status = 'Off'
+                WHERE schedule_id IN (
+                    SELECT schedule_id FROM doctor_schedules
+                    WHERE doctor_id = @docId AND work_date BETWEEN @sDate AND @eDate
+                );
+                UPDATE doctor_schedules
+                SET status = 'Off'
+                WHERE doctor_id = @docId AND work_date BETWEEN @sDate AND @eDate;
+            ";
+            var p1 = updCmd.CreateParameter(); p1.ParameterName = "@docId"; p1.Value = doctorId; updCmd.Parameters.Add(p1);
+            var p2 = updCmd.CreateParameter(); p2.ParameterName = "@sDate"; p2.Value = startDate.ToDateTime(TimeOnly.MinValue); updCmd.Parameters.Add(p2);
+            var p3 = updCmd.CreateParameter(); p3.ParameterName = "@eDate"; p3.Value = endDate.ToDateTime(TimeOnly.MinValue); updCmd.Parameters.Add(p3);
+            await updCmd.ExecuteNonQueryAsync();
+        }
+        catch (Exception schedEx)
+        {
+            Console.WriteLine($"[{callerTag} Warning] Không thể cập nhật status doctor_schedules: {schedEx.Message}");
         }
     }
 }
