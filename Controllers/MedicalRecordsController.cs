@@ -736,9 +736,16 @@ namespace DTT_Backend_API.Controllers
                 var appt = await _context.Appointments.FirstOrDefaultAsync(a => a.AppointmentId == dto.AppointmentId);
                 if (appt != null)
                 {
-                    // [Old code]: appt.StatusId = 4; // 4 = Completed
-                    // [New code]:
-                    appt.StatusId = (dto.Prescriptions != null && dto.Prescriptions.Count > 0) ? 10 : 4;
+                    // Cần thanh toán viện phí trước khi cấp phát thuốc:
+                    var paidInvoice = await _context.Invoices.FirstOrDefaultAsync(i => i.AppointmentId == appt.AppointmentId && i.PaymentStatus == "paid");
+                    if (paidInvoice != null)
+                    {
+                        appt.StatusId = (dto.Prescriptions != null && dto.Prescriptions.Count > 0) ? 10 : 4;
+                    }
+                    else
+                    {
+                        appt.StatusId = 11; // 11 = PendingPayment (Chờ thanh toán viện phí/tiền thuốc)
+                    }
                     appt.UpdatedAt = DateTime.UtcNow;
                     await _context.SaveChangesAsync();
                 }
@@ -781,9 +788,10 @@ namespace DTT_Backend_API.Controllers
         {
             try
             {
+                // Hàng đợi Dược sĩ: CHỈ hiển thị các ca khám đã hoàn tất thanh toán và chuyển sang StatusId = 10 (PendingDispensing)
                 var query = _context.Appointments
                     .AsNoTracking()
-                    .Where(a => a.StatusId == 10 || a.StatusId == 3);
+                    .Where(a => a.StatusId == 10);
 
                 if (todayOnly)
                 {
@@ -1126,6 +1134,13 @@ namespace DTT_Backend_API.Controllers
                 if (rxList.Count == 0)
                 {
                     return NotFound(new { success = false, message = "Không tìm thấy đơn thuốc cho ca khám này." });
+                }
+
+                // Kiểm tra điều kiện tiên quyết: Bệnh nhân phải thanh toán hóa đơn viện phí trước khi Dược sĩ cấp phát thuốc
+                var unpaidInvoice = await _context.Invoices.FirstOrDefaultAsync(i => i.AppointmentId == appointmentId && i.PaymentStatus != "paid");
+                if (unpaidInvoice != null)
+                {
+                    return BadRequest(new { success = false, message = "Bệnh nhân chưa thanh toán hóa đơn viện phí/thuốc. Vui lòng yêu cầu bệnh nhân thanh toán tại Quầy Thu Ngân trước khi cấp phát thuốc." });
                 }
 
                 string pName = !string.IsNullOrWhiteSpace(dto?.PharmacistName)
