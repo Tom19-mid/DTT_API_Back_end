@@ -127,12 +127,25 @@ public class AppointmentsController : ControllerBase
             // dto.TimeSlot), và nếu bác sĩ đó không còn slot trống thì lấy ĐẠI slot của BÁC SĨ KHÁC —
             // khiến lịch hẹn tạo ra lệch hẳn so với ngày/giờ/bác sĩ mà bệnh nhân thực sự chọn trên
             // Mobile (đúng như QA report: "ngày khám của Bác sĩ đó không có nhưng trên mobile hiện là có").
+            var nowVn = DateTime.UtcNow.AddHours(7);
+            var todayVn = DateOnly.FromDateTime(nowVn);
+
+            if (apptDate.HasValue && apptDate.Value < todayVn)
+            {
+                return BadRequest(new { success = false, message = "Không thể đặt lịch khám cho ngày trong quá khứ. Vui lòng chọn ngày khác." });
+            }
+
             int slotId = 0;
             TimeSpan? requestedStart = null;
             if (!string.IsNullOrWhiteSpace(dto.TimeSlot))
             {
                 var startPart = dto.TimeSlot.Split('-')[0].Trim();
                 if (TimeSpan.TryParse(startPart, out var parsedStart)) requestedStart = parsedStart;
+            }
+
+            if (apptDate.HasValue && apptDate.Value == todayVn && requestedStart.HasValue && requestedStart.Value <= nowVn.TimeOfDay)
+            {
+                return BadRequest(new { success = false, message = "Khung giờ khám này đã trôi qua. Vui lòng chọn khung giờ khác hoặc ngày tiếp theo." });
             }
 
             try

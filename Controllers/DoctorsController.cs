@@ -725,7 +725,7 @@ public class DoctorsController : ControllerBase
         // không liên quan gì tới dữ liệu DB — khiến Mobile/WinForms hiện lịch khám sai ngày/sai khung giờ
         // so với những gì Lễ Tân/Admin thấy trên Web).
         var doctorIds = doctors.Select(d => d.DoctorId).ToList();
-        var scheduleByDoctor = new Dictionary<int, int>(); // doctorId -> schedule_id
+        var schedulesByDoctor = new Dictionary<int, List<int>>(); // doctorId -> list of schedule_ids (ca sáng + ca chiều)
         var scheduleStatus = new Dictionary<int, string>(); // schedule_id -> status
         var slotsBySchedule = new Dictionary<int, List<string>>(); // schedule_id -> ["HH:mm - HH:mm", ...]
         // Một bác sĩ có thể có NHIỀU dòng doctor_schedules trong cùng 1 work_date (ca sáng + ca chiều,
@@ -756,7 +756,9 @@ public class DoctorsController : ControllerBase
                     int schId = reader.GetInt32(0);
                     int docId = reader.GetInt32(1);
                     string status = reader.IsDBNull(2) ? "Available" : reader.GetString(2);
-                    scheduleByDoctor[docId] = schId;
+                    if (!schedulesByDoctor.ContainsKey(docId))
+                        schedulesByDoctor[docId] = new List<int>();
+                    schedulesByDoctor[docId].Add(schId);
                     scheduleStatus[schId] = status;
                     scheduleIds.Add(schId);
 
@@ -772,7 +774,12 @@ public class DoctorsController : ControllerBase
                 }
             }
 
-            if (scheduleIds.Count > 0)
+            var nowVn = DateTime.UtcNow.AddHours(7);
+            bool isPastDate = targetDate.Date < nowVn.Date;
+            bool isToday = targetDate.Date == nowVn.Date;
+            TimeSpan currentTime = nowVn.TimeOfDay;
+
+            if (scheduleIds.Count > 0 && !isPastDate)
             {
                 var schIdsStr = string.Join(",", scheduleIds);
                 using var slotCmd = conn.CreateCommand();
@@ -788,25 +795,72 @@ public class DoctorsController : ControllerBase
                     int schId = slotReader.GetInt32(0);
                     TimeSpan sTime = GetTimeSpanValue(slotReader, 1);
                     TimeSpan eTime = GetTimeSpanValue(slotReader, 2);
+
+                    // Nếu ngày xem là hôm nay, bỏ qua các khung giờ đã trôi qua so với giờ hiện tại
+                    if (isToday && sTime <= currentTime)
+                    {
+                        continue;
+                    }
+
                     if (!slotsBySchedule.ContainsKey(schId)) slotsBySchedule[schId] = new List<string>();
                     slotsBySchedule[schId].Add($"{sTime.Hours:D2}:{sTime.Minutes:D2} - {eTime.Hours:D2}:{eTime.Minutes:D2}");
                 }
             }
         }
 
+        var targetDateOnly = DateOnly.FromDateTime(targetDate);
+        var onLeaveDoctorIds = await _context.DoctorLeaves
+            .AsNoTracking()
+            .Where(l => doctorIds.Contains(l.DoctorId) &&
+                        (l.Status == "Approved" || l.Status == "Đã duyệt") &&
+                        l.LeaveStartDate <= targetDateOnly &&
+                        l.LeaveEndDate >= targetDateOnly)
+            .Select(l => l.DoctorId)
+            .Distinct()
+            .ToListAsync();
+
         var list = new List<object>();
 
         foreach (var doc in doctors)
         {
-            bool hasSchedule = scheduleByDoctor.TryGetValue(doc.DoctorId, out var scheduleId);
-            string rawStatus = hasSchedule ? scheduleStatus.GetValueOrDefault(scheduleId, "Available") : "Unavailable";
-            bool isWorking = hasSchedule && rawStatus != "Unavailable" && rawStatus != "Off" && rawStatus != "Không hoạt động";
-            var timeSlots = isWorking && slotsBySchedule.TryGetValue(scheduleId, out var slots) ? slots.ToArray() : Array.Empty<string>();
+            bool hasSchedule = schedulesByDoctor.TryGetValue(doc.DoctorId, out var docScheduleIds) && docScheduleIds.Count > 0;
+            bool isWorking = hasSchedule && docScheduleIds!.Any(sId =>
+            {
+                var raw = scheduleStatus.GetValueOrDefault(sId, "Available");
+                return raw != "Unavailable" && raw != "Off" && raw != "Không hoạt động";
+            });
 
-            string shiftDescription = "Nghỉ phép (Off)";
+            // Gộp tất cả các khung giờ từ tất cả các ca (sáng + chiều) của bác sĩ
+            var allSlots = new List<string>();
+            if (isWorking && docScheduleIds != null)
+            {
+                foreach (var sId in docScheduleIds)
+                {
+                    var raw = scheduleStatus.GetValueOrDefault(sId, "Available");
+                    if (raw != "Unavailable" && raw != "Off" && raw != "Không hoạt động")
+                    {
+                        if (slotsBySchedule.TryGetValue(sId, out var sSlots))
+                        {
+                            allSlots.AddRange(sSlots);
+                        }
+                    }
+                }
+            }
+            var timeSlots = allSlots.Distinct().OrderBy(s => s).ToArray();
+
+            bool isOnLeave = onLeaveDoctorIds.Contains(doc.DoctorId);
+            string shiftDescription;
             if (isWorking)
             {
                 shiftDescription = timeSlots.Length > 0 ? "Đang nhận lịch khám" : "Đã kín lịch khám";
+            }
+            else if (isOnLeave)
+            {
+                shiftDescription = "Nghỉ phép (Off)";
+            }
+            else
+            {
+                shiftDescription = "Không có lịch khám";
             }
 
             string shiftStartTime = "";
@@ -829,6 +883,7 @@ public class DoctorsController : ControllerBase
                 Date = targetDate.ToString("dd/MM/yyyy"),
                 DayOfWeek = GetVietnameseDayName(targetDate.DayOfWeek),
                 IsWorking = isWorking,
+                IsOnLeave = isOnLeave,
                 StatusText = shiftDescription,
                 TimeSlots = timeSlots,
                 ShiftStartTime = shiftStartTime,
