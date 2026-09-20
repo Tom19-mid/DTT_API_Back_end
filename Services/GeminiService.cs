@@ -21,6 +21,8 @@ public class GeminiService
         _config = config;
     }
 
+    private const string DefaultModel = "gemini-3.6-flash";
+
     private const string DefaultFallbackReply =
         "Xin lỗi, hệ thống trợ lý AI hiện đang bận. Bạn có muốn chuyển sang tư vấn trực tiếp với Nhân viên Lễ tân không?";
 
@@ -33,23 +35,49 @@ public class GeminiService
         // Retry 1 lần khi gặp lỗi mạng có tính chất tạm thời (socket bị reset/aborted giữa chừng —
         // quan sát thực tế cho thấy Gemini API thỉnh thoảng rớt kết nối rồi lần gọi tiếp theo thành công
         // ngay). KHÔNG retry khi lỗi rõ ràng là "cấu hình sai" (thiếu key) — retry vô ích, chỉ tổ chờ lâu.
-        var attempt1 = await TryCallOnceAsync(historyList, specialtyNames, ct);
-        if (attempt1 != null) return attempt1;
+        //
+        // Các lần thử sau dùng lần lượt các model trong Gemini:FallbackModel (cách nhau bằng dấu phẩy)
+        // thay vì gọi lại đúng model vừa lỗi: log Render ngày 2026-09-20 cho thấy model chính hay trả
+        // HTTP 503 (quá tải phía Google) ở CẢ 2 lần gọi liên tiếp, và gói Free chỉ cho 20 request/ngày
+        // MỖI model (trả 429 khi hết) — đổi sang model khác vừa né 503 vừa cộng thêm quota riêng.
+        var models = new List<string> { _config["Gemini:Model"] ?? DefaultModel };
+        var fallbacks = (_config["Gemini:FallbackModel"] ?? string.Empty)
+            .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        foreach (var m in fallbacks)
+            if (!models.Contains(m)) models.Add(m);
+        if (models.Count == 1) models.Add(models[0]); // không có model dự phòng: giữ hành vi cũ, thử lại 1 lần
 
-        await Task.Delay(400, ct);
-        var attempt2 = await TryCallOnceAsync(historyList, specialtyNames, ct);
-        return attempt2 ?? new GeminiChatResult(false, DefaultFallbackReply, null, true);
+        // Mobile App chờ tối đa ~28s (AIChatScreen/apiService.sendMessage) — không bắt đầu thêm lần thử
+        // nào nếu có nguy cơ vượt ngưỡng đó, tránh việc app đã bỏ cuộc trong khi backend vẫn đang gọi.
+        var timeoutSeconds = _config.GetValue<int?>("Gemini:TimeoutSeconds") ?? 12;
+        var started = DateTime.UtcNow;
+
+        for (int i = 0; i < models.Count; i++)
+        {
+            if (i > 0)
+            {
+                if ((DateTime.UtcNow - started).TotalSeconds + timeoutSeconds > 26) break;
+                await Task.Delay(300, ct);
+            }
+
+            var result = await TryCallOnceAsync(historyList, specialtyNames, models[i], ct);
+            if (result != null) return result;
+        }
+
+        return new GeminiChatResult(false, DefaultFallbackReply, null, true);
     }
 
     // Trả về null khi lỗi (để GetReplyAsync quyết định có retry hay không), khác với việc trả thẳng
     // GeminiChatResult(Success=false,...) — tránh lẫn giữa "đã thử và fallback" với "chưa thử được".
-    private async Task<GeminiChatResult?> TryCallOnceAsync(IReadOnlyList<ChatMessage> history, IReadOnlyList<string> specialtyNames, CancellationToken ct)
+    private async Task<GeminiChatResult?> TryCallOnceAsync(IReadOnlyList<ChatMessage> history, IReadOnlyList<string> specialtyNames, string model, CancellationToken ct)
     {
         var apiKey = _config["Gemini:ApiKey"];
         if (string.IsNullOrWhiteSpace(apiKey))
+        {
+            Console.WriteLine("[GeminiService] Thiếu cấu hình Gemini:ApiKey — trả câu trả lời mặc định.");
             return new GeminiChatResult(false, DefaultFallbackReply, null, true); // sai cấu hình — không retry
+        }
 
-        var model = _config["Gemini:Model"] ?? "gemini-3.6-flash";
         var timeoutSeconds = _config.GetValue<int?>("Gemini:TimeoutSeconds") ?? 12;
 
         var contents = history
@@ -99,7 +127,7 @@ public class GeminiService
             if (!response.IsSuccessStatusCode)
             {
                 var errBody = await response.Content.ReadAsStringAsync(cts.Token);
-                Console.WriteLine($"[GeminiService] HTTP {(int)response.StatusCode} từ Gemini API: {errBody}");
+                Console.WriteLine($"[GeminiService] HTTP {(int)response.StatusCode} từ Gemini API (model {model}): {errBody.ReplaceLineEndings(" ")}");
                 return null; // có thể là lỗi tạm thời (503/429/socket phía server Google) — để GetReplyAsync retry
             }
 

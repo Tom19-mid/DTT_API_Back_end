@@ -339,7 +339,7 @@ public class AuthController : ControllerBase
         _otpStore[user.PhoneNumber] = (otp, DateTime.UtcNow.AddMinutes(5));
 
         Console.WriteLine("\n╔═════════════════════════════════════════════════════════════════════╗");
-        Console.WriteLine($"║ 🔑 [DEMO ĐỒ ÁN TỐT NGHIỆP] MÃ OTP ĐĂNG KÝ TÀI KHOẢN: {otp}        ║");
+        Console.WriteLine($"║ 🔑 [DEMO] MÃ OTP ĐĂNG KÝ TÀI KHOẢN: {otp}        ║");
         Console.WriteLine($"║ 📱 Số điện thoại: {dto.Phone,-49} ║");
         Console.WriteLine($"║ ⏳ Thời gian hiệu lực: 5 phút (đến {DateTime.Now.AddMinutes(5):HH:mm:ss})                      ║");
         Console.WriteLine("╚═════════════════════════════════════════════════════════════════════╝\n");
@@ -410,7 +410,7 @@ public class AuthController : ControllerBase
         _otpStore[user.PhoneNumber] = (otp, DateTime.UtcNow.AddMinutes(5));
 
         Console.WriteLine("\n╔═════════════════════════════════════════════════════════════════════╗");
-        Console.WriteLine($"║ 🔑 [DEMO ĐỒ ÁN TỐT NGHIỆP] MÃ OTP BỆNH NHÂN: {otp}                  ║");
+        Console.WriteLine($"║ 🔑 [DEMO] MÃ OTP BỆNH NHÂN: {otp}                  ║");
         Console.WriteLine($"║ 📱 Số điện thoại: {dto.Phone,-49} ║");
         Console.WriteLine($"║ ⏳ Thời gian hiệu lực: 5 phút (đến {DateTime.Now.AddMinutes(5):HH:mm:ss})                      ║");
         Console.WriteLine("╚═════════════════════════════════════════════════════════════════════╝\n");
@@ -444,18 +444,16 @@ public class AuthController : ControllerBase
         if (entry.Code != dto.OtpCode)
             return BadRequest(new { success = false, message = "Mã OTP không chính xác. Vui lòng kiểm tra lại." });
 
-        // Update user status & patient verification status in database upon OTP confirmation
+        // OTP chỉ chứng minh người dùng sở hữu số điện thoại — KHÔNG phải xác thực danh tính.
+        // Trước đây bước này tự đặt patients.verification_status = "verified", khiến tài khoản mới
+        // tạo xong được duyệt ngay mà không cần Lễ Tân đối chiếu CCCD thật ở quầy. Trạng thái
+        // "verified" chỉ được đặt bởi PatientsController.VerifyPatient (Lễ Tân nhập CCCD).
         var user = await _context.Users.FirstOrDefaultAsync(u => u.PhoneNumber == dto.Phone);
         Patient? patient = null;
         if (user != null)
         {
             user.Status = "Active";
             patient = await _context.Patients.FirstOrDefaultAsync(p => p.UserId == user.UserId);
-            if (patient != null)
-            {
-                patient.VerificationStatus = "verified";
-                patient.VerifiedAt = DateTime.UtcNow;
-            }
             await _context.SaveChangesAsync();
         }
 
@@ -471,7 +469,7 @@ public class AuthController : ControllerBase
             fullName = patient?.FullName ?? "Bệnh nhân",
             phone = user?.PhoneNumber,
             email = user?.Email,
-            verificationStatus = patient?.VerificationStatus ?? "verified"
+            verificationStatus = patient?.VerificationStatus ?? "pending"
         });
     }
 
