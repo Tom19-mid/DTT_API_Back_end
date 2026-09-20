@@ -4,3 +4,6 @@ obj/
 .vs/
 *.user
 appsettings.Development.json
+# Chứa secret thật (DB, JWT, Gemini, PayPal, VnPay) — không đóng gói vào image,
+# cấu hình qua biến môi trường trên Render (dạng Section__Key, VD: ConnectionStrings__DefaultConnection)
+appsettings.json
