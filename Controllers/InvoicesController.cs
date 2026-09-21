@@ -1,8 +1,10 @@
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.SignalR;
 using Microsoft.EntityFrameworkCore;
 using DTT_Backend_API.Data;
 using DTT_Backend_API.Helpers;
+using DTT_Backend_API.Hubs;
 using DTT_Backend_API.Models;
 using System.Linq;
 using System.Security.Claims;
@@ -18,13 +20,15 @@ public class InvoicesController : ControllerBase
     // [Old code - Dịch vụ VNPAY]:
     // private readonly DTT_Backend_API.Services.IVnPayService _vnPayService;
     private readonly DTT_Backend_API.Models.PaypalClient _paypalClient;
+    private readonly IHubContext<NotificationHub> _hub;
 
-    public InvoicesController(AppDbContext context, IConfiguration config, DTT_Backend_API.Models.PaypalClient paypalClient)
+    public InvoicesController(AppDbContext context, IConfiguration config, DTT_Backend_API.Models.PaypalClient paypalClient, IHubContext<NotificationHub> hub)
     {
         _context = context;
         _config = config;
         // _vnPayService = vnPayService;
         _paypalClient = paypalClient;
+        _hub = hub;
     }
 
     // Trả về user_id thật của nhân viên đang đăng nhập (từ JWT), thay vì đoán đại một tài khoản
@@ -429,6 +433,10 @@ public class InvoicesController : ControllerBase
             // tài khoản từ trước (đặc biệt phiền với nhánh người thân: SĐT gửi lên là SĐT của CHỦ TÀI
             // KHOẢN do người thân thường không có SĐT riêng).
             bool sendNewAccountNotification = true;
+            // Chủ tài khoản vừa được ĐỔI từ chưa xác thực → "verified" nhờ Lễ Tân đối chiếu CCCD ở luồng này.
+            // Phải báo cho App Mobile (thông báo + SignalR) như PatientsController.VerifyPatient đang làm —
+            // trước đây luồng "Khám Trực Tiếp" chỉ ghi DB, nên app vẫn hiện "Chưa duyệt" cho tới khi đăng nhập lại.
+            Patient? justVerifiedPatient = null;
 
             if (dto.MemberId.HasValue && dto.MemberId.Value > 0 && dto.OwnerPatientId.HasValue && dto.OwnerPatientId.Value > 0)
             {
@@ -475,6 +483,7 @@ public class InvoicesController : ControllerBase
                     existingPatient.VerificationStatus = "verified";
                     existingPatient.VerifiedBy = GetCurrentStaffUserId();
                     existingPatient.VerifiedAt = DateTime.UtcNow;
+                    justVerifiedPatient = existingPatient;
                 }
                 existingPatient.UpdatedAt = DateTime.UtcNow;
                 await _context.SaveChangesAsync();
@@ -494,6 +503,7 @@ public class InvoicesController : ControllerBase
                 existingPatientByPhone.PhoneNumber = dto.Phone;
                 existingPatientByPhone.CccdNumber = dto.CccdNumber;
                 if (!string.IsNullOrEmpty(dto.BhytNumber)) existingPatientByPhone.HealthInsuranceNumber = dto.BhytNumber;
+                if (existingPatientByPhone.VerificationStatus != "verified") justVerifiedPatient = existingPatientByPhone;
                 existingPatientByPhone.VerificationStatus = "verified";
                 existingPatientByPhone.VerifiedAt = DateTime.UtcNow;
                 existingPatientByPhone.UpdatedAt = DateTime.UtcNow;
@@ -565,8 +575,18 @@ public class InvoicesController : ControllerBase
                         WHERE ds.doctor_id = @docId
                           AND ds.work_date = @workDate
                           AND s.slot_id NOT IN (SELECT slot_id FROM appointments WHERE slot_id IS NOT NULL AND is_active = true)
-                        ORDER BY s.slot_id DESC
+                        -- Khách trực tiếp cần khám NGAY: ưu tiên khung giờ đang diễn ra, rồi khung giờ sắp tới gần nhất,
+                        -- cuối cùng mới tới khung giờ đã qua gần nhất (trước đây lấy khung có slot_id lớn nhất — thường là
+                        -- khung giờ CUỐI ca, vd 23:00, không liên quan gì đến giờ đăng ký).
+                        ORDER BY CASE
+                                   WHEN s.start_time <= CAST(@nowTime AS time) AND s.end_time > CAST(@nowTime AS time) THEN 0
+                                   WHEN s.start_time > CAST(@nowTime AS time) THEN 1
+                                   ELSE 2
+                                 END,
+                                 ABS(EXTRACT(EPOCH FROM (s.start_time - CAST(@nowTime AS time)))),
+                                 s.slot_id
                         LIMIT 1";
+                    var pNow = slotCmd.CreateParameter(); pNow.ParameterName = "@nowTime"; pNow.Value = DateTime.UtcNow.AddHours(7).TimeOfDay; slotCmd.Parameters.Add(pNow);
                     var pDoc = slotCmd.CreateParameter(); pDoc.ParameterName = "@docId"; pDoc.Value = dto.DoctorId; slotCmd.Parameters.Add(pDoc);
                     var pWd = slotCmd.CreateParameter(); pWd.ParameterName = "@workDate"; pWd.Value = todayVnForSlot.ToDateTime(TimeOnly.MinValue); slotCmd.Parameters.Add(pWd);
                     var val = await slotCmd.ExecuteScalarAsync();
@@ -727,7 +747,31 @@ public class InvoicesController : ControllerBase
                 });
             }
 
+            if (justVerifiedPatient != null && justVerifiedPatient.UserId != Guid.Empty)
+            {
+                var cccdForNotice = dto.CccdNumber ?? "";
+                var cccdMaskedForNotice = cccdForNotice.Length >= 4 ? "****" + cccdForNotice.Substring(cccdForNotice.Length - 4) : cccdForNotice;
+                _context.Notifications.Add(new Notification
+                {
+                    UserId = justVerifiedPatient.UserId,
+                    Title = "✅ Tài khoản đã được Xác Thực CCCD",
+                    Content = $"Hồ sơ của bạn ({justVerifiedPatient.FullName}) đã được Lễ Tân Bệnh viện DTT Healthcare đối chiếu thẻ CCCD thực tế (CCCD: {cccdMaskedForNotice}) và chính thức được XÁC THỰC. Bạn có thể đặt lịch khám và sử dụng đầy đủ các tính năng của ứng dụng!",
+                    Type = "system",
+                    IsRead = false,
+                    CreatedAt = DateTime.UtcNow
+                });
+            }
+
             await _context.SaveChangesAsync();
+
+            if (justVerifiedPatient != null && justVerifiedPatient.UserId != Guid.Empty)
+            {
+                try
+                {
+                    await _hub.Clients.Group($"user:{justVerifiedPatient.UserId}").SendAsync("VerificationStatusChanged", new { verificationStatus = "verified" });
+                }
+                catch { /* đẩy real-time thất bại không được chặn kết quả đặt khám */ }
+            }
 
             // Tự động ghi đồng bộ thông tin vào file static users.csv & patients.csv trên đĩa — CHỈ khi
             // thật sự vừa tạo/khớp tài khoản mới qua SĐT. Nhánh "chọn sẵn bệnh nhân/người thân đã có hồ

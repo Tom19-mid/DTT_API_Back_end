@@ -224,6 +224,31 @@ public class HealthPackagesController : ControllerBase
 
             DateTime workDateDb = apptDateForPackage.ToDateTime(TimeOnly.MinValue);
 
+            // Ưu tiên bác sĩ cùng chuyên khoa ĐÃ CÓ lịch làm việc thật trong ngày khám (nhiều khung giờ
+            // trống nhất trước). Trước đây luôn lấy bác sĩ đầu tiên của chuyên khoa dù hôm đó họ không có
+            // lịch — code bên dưới lúc đó tự tạo 1 "ca giả" 07:30–17:00 cho họ, khiến bác sĩ này hiện trên
+            // app là "đang làm việc" với 0 khung giờ thay vì "Không có lịch khám".
+            using (var docPickCmd = conn.CreateCommand())
+            {
+                docPickCmd.CommandText = @"
+                    SELECT d.doctor_id
+                    FROM doctors d
+                    JOIN doctor_schedules s ON s.doctor_id = d.doctor_id AND s.work_date = @wDate
+                    WHERE d.specialty_id = @spec AND d.status = 'Active' AND d.is_test_data = false
+                      AND COALESCE(s.status, 'Available') NOT IN ('Unavailable', 'Off', 'Không hoạt động')
+                    GROUP BY d.doctor_id
+                    ORDER BY (SELECT COUNT(*) FROM doctor_schedule_slots ss
+                              JOIN doctor_schedules s2 ON s2.schedule_id = ss.schedule_id
+                              WHERE s2.doctor_id = d.doctor_id AND s2.work_date = @wDate AND ss.status = 'Available'
+                                AND ss.slot_id NOT IN (SELECT slot_id FROM appointments WHERE slot_id IS NOT NULL)) DESC,
+                             d.doctor_id
+                    LIMIT 1";
+                var pdW = docPickCmd.CreateParameter(); pdW.ParameterName = "@wDate"; pdW.Value = workDateDb; docPickCmd.Parameters.Add(pdW);
+                var pdS = docPickCmd.CreateParameter(); pdS.ParameterName = "@spec"; pdS.Value = targetSpecialtyId; docPickCmd.Parameters.Add(pdS);
+                var pickedDoctor = await docPickCmd.ExecuteScalarAsync();
+                if (pickedDoctor != null && pickedDoctor != DBNull.Value) validDoctorId = Convert.ToInt32(pickedDoctor);
+            }
+
             using (var schedCmd = conn.CreateCommand())
             {
                 // Một bác sĩ có thể có NHIỀU dòng doctor_schedules trong cùng 1 ngày (ca sáng + ca chiều
@@ -235,22 +260,26 @@ public class HealthPackagesController : ControllerBase
                 var pD = schedCmd.CreateParameter(); pD.ParameterName = "@dId"; pD.Value = validDoctorId; schedCmd.Parameters.Add(pD);
                 var pW = schedCmd.CreateParameter(); pW.ParameterName = "@wDate"; pW.Value = workDateDb; schedCmd.Parameters.Add(pW);
                 int scId = 0;
+                // Khoảng giờ của ca được chọn — dùng để tìm giờ trống khi khung giờ mong muốn đã tồn tại.
+                TimeSpan scStart = new TimeSpan(7, 30, 0), scEnd = new TimeSpan(17, 0, 0);
                 using (var schedReader = await schedCmd.ExecuteReaderAsync())
                 {
                     int? firstRowId = null;
+                    TimeSpan firstStart = scStart, firstEnd = scEnd;
                     while (await schedReader.ReadAsync())
                     {
                         int rowId = schedReader.GetInt32(0);
-                        firstRowId ??= rowId;
                         var rowStart = GetTimeSpanValue(schedReader, 1);
                         var rowEnd = GetTimeSpanValue(schedReader, 2);
+                        if (!firstRowId.HasValue) { firstRowId = rowId; firstStart = rowStart; firstEnd = rowEnd; }
                         if (reqStart >= rowStart && reqStart < rowEnd)
                         {
                             scId = rowId;
+                            scStart = rowStart; scEnd = rowEnd;
                             break;
                         }
                     }
-                    if (scId == 0 && firstRowId.HasValue) scId = firstRowId.Value;
+                    if (scId == 0 && firstRowId.HasValue) { scId = firstRowId.Value; scStart = firstStart; scEnd = firstEnd; }
                 }
 
                 if (scId == 0)
@@ -266,16 +295,49 @@ public class HealthPackagesController : ControllerBase
                 if (scId > 0)
                 {
                     using var slotCmd = conn.CreateCommand();
-                    slotCmd.CommandText = @"SELECT slot_id FROM doctor_schedule_slots 
-                                            WHERE schedule_id = @sId AND status = 'Available' 
-                                              AND slot_id NOT IN (SELECT slot_id FROM appointments WHERE slot_id IS NOT NULL) 
-                                            ORDER BY start_time ASC LIMIT 1";
+                    // Ưu tiên khung giờ trống ĐÚNG giờ bệnh nhân chọn, không có thì lấy khung giờ trống sớm nhất
+                    // (giữ hành vi cũ). CAST(... AS time) vì Npgsql gửi TimeSpan dưới dạng interval.
+                    slotCmd.CommandText = @"SELECT slot_id FROM doctor_schedule_slots
+                                            WHERE schedule_id = @sId AND status = 'Available'
+                                              AND slot_id NOT IN (SELECT slot_id FROM appointments WHERE slot_id IS NOT NULL)
+                                            ORDER BY (start_time = CAST(@rStart AS time)) DESC, start_time ASC LIMIT 1";
                     var pS = slotCmd.CreateParameter(); pS.ParameterName = "@sId"; pS.Value = scId; slotCmd.Parameters.Add(pS);
+                    var pRs = slotCmd.CreateParameter(); pRs.ParameterName = "@rStart"; pRs.Value = reqStart; slotCmd.Parameters.Add(pRs);
                     var slVal = await slotCmd.ExecuteScalarAsync();
                     if (slVal != null && slVal != DBNull.Value) validSlotId = Convert.ToInt32(slVal);
 
                     if (validSlotId == 0)
                     {
+                        // Không còn khung giờ trống → tạo khung giờ mới. Bảng có UNIQUE (schedule_id, start_time):
+                        // nếu khung giờ mong muốn đã tồn tại (đã có người đặt) thì chèn lại đúng giờ đó sẽ vi phạm
+                        // ràng buộc ("23505 doctor_schedule_slots_schedule_id_start_time_key") và đặt gói khám
+                        // thất bại. Tìm 1 giờ bắt đầu CHƯA có trong ca này (mong muốn trước, rồi quét cả ca theo
+                        // bước 30 phút); hết chỗ thì báo lỗi rõ ràng thay vì lỗi database.
+                        var takenStarts = new HashSet<TimeSpan>();
+                        using (var takenCmd = conn.CreateCommand())
+                        {
+                            takenCmd.CommandText = "SELECT start_time FROM doctor_schedule_slots WHERE schedule_id = @sId";
+                            var pT = takenCmd.CreateParameter(); pT.ParameterName = "@sId"; pT.Value = scId; takenCmd.Parameters.Add(pT);
+                            using var takenReader = await takenCmd.ExecuteReaderAsync();
+                            while (await takenReader.ReadAsync()) takenStarts.Add(GetTimeSpanValue(takenReader, 0));
+                        }
+
+                        TimeSpan? freeStart = null;
+                        if (!takenStarts.Contains(reqStart)) freeStart = reqStart;
+                        else
+                        {
+                            var step = TimeSpan.FromMinutes(30);
+                            for (var t = scStart; t + step <= scEnd; t += step)
+                            {
+                                if (!takenStarts.Contains(t)) { freeStart = t; break; }
+                            }
+                        }
+                        if (freeStart == null)
+                            return BadRequest(new { success = false, message = "Ngày này đã kín lịch khám, vui lòng chọn ngày hoặc khung giờ khác." });
+
+                        reqEnd = freeStart.Value == reqStart ? reqEnd : freeStart.Value + TimeSpan.FromMinutes(30);
+                        reqStart = freeStart.Value;
+
                         using var insSlot = conn.CreateCommand();
                         insSlot.CommandText = @"INSERT INTO doctor_schedule_slots (schedule_id, slot_order, start_time, end_time, status, created_at, updated_at) 
                                                 VALUES (@sId, (SELECT COALESCE(MAX(slot_order), 0) + 1 FROM doctor_schedule_slots WHERE schedule_id = @sId), @sTime, @eTime, 'Available', NOW(), NOW()) 

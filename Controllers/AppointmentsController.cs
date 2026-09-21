@@ -823,6 +823,41 @@ public class AppointmentsController : ControllerBase
         var cancellerUserIds = list.Where(a => a.CancelledBy.HasValue && a.CancelledBy.Value != Guid.Empty).Select(a => a.CancelledBy!.Value).Distinct().ToList();
         var cancellerUserMap = await _context.Users.AsNoTracking().Where(u => cancellerUserIds.Contains(u.UserId)).ToDictionaryAsync(u => u.UserId);
 
+        // Giờ THẬT của khung giờ mỗi lịch hẹn đang giữ (doctor_schedule_slots). Lịch "Khám vãng lai/Khám trực tiếp"
+        // lưu Reason không kèm giờ nào — trước đây phần bên dưới không tìm thấy giờ trong Reason nên rơi về giá
+        // trị cứng "08:30 - 09:30", khiến lễ tân/bác sĩ/bệnh nhân thấy giờ khám sai so với ca trực đã chọn.
+        var slotTimeMap = new Dictionary<int, string>();
+        var slotIdsForTime = list.Where(a => a.SlotId.HasValue).Select(a => a.SlotId!.Value).Distinct().ToList();
+        if (slotIdsForTime.Count > 0)
+        {
+            try
+            {
+                var slotConn = _context.Database.GetDbConnection();
+                if (slotConn.State != System.Data.ConnectionState.Open) await slotConn.OpenAsync();
+                using var slotTimeCmd = slotConn.CreateCommand();
+                slotTimeCmd.CommandText = $"SELECT slot_id, start_time, end_time FROM doctor_schedule_slots WHERE slot_id IN ({string.Join(",", slotIdsForTime)})";
+                using var slotTimeReader = await slotTimeCmd.ExecuteReaderAsync();
+                while (await slotTimeReader.ReadAsync())
+                {
+                    if (slotTimeReader.IsDBNull(1) || slotTimeReader.IsDBNull(2)) continue;
+                    TimeSpan ParseSlotTime(int idx)
+                    {
+                        var v = slotTimeReader.GetValue(idx);
+                        if (v is TimeSpan ts) return ts;
+                        if (v is DateTime dt) return dt.TimeOfDay;
+                        return TimeSpan.TryParse(v?.ToString(), out var parsed) ? parsed : TimeSpan.Zero;
+                    }
+                    var st = ParseSlotTime(1);
+                    var et = ParseSlotTime(2);
+                    slotTimeMap[slotTimeReader.GetInt32(0)] = $"{st.Hours:D2}:{st.Minutes:D2} - {et.Hours:D2}:{et.Minutes:D2}";
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine("FormatAppointmentList slot time lookup failed: " + ex.Message);
+            }
+        }
+
         // Tính trước phí thuốc thật cho toàn bộ danh sách lịch hẹn để WinForms & Mobile hiển thị đúng ngay lập tức
         var recordList = await _context.MedicalRecords.AsNoTracking()
             .Where(m => apptIds.Contains(m.AppointmentId))
@@ -944,7 +979,11 @@ public class AppointmentsController : ControllerBase
             string dateStr = appt.AppointmentDate.HasValue
                 ? appt.AppointmentDate.Value.ToString("dd/MM/yyyy")
                 : appt.CreatedAt.AddHours(7).ToString("dd/MM/yyyy");
-            string timeStr = "08:30 - 09:30";
+            // Mặc định = giờ thật của khung giờ đang giữ; chỉ khi không có slot mới dùng giá trị cứng cũ.
+            // Nếu Reason có ghi giờ (lịch đặt qua App) thì phần bên dưới vẫn ghi đè như trước.
+            string timeStr = appt.SlotId.HasValue && slotTimeMap.TryGetValue(appt.SlotId.Value, out var slotTimeText)
+                ? slotTimeText
+                : "08:30 - 09:30";
 
             if (!string.IsNullOrEmpty(appt.Reason))
             {

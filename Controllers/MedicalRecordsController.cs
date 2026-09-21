@@ -642,10 +642,36 @@ namespace DTT_Backend_API.Controllers
                 if (!string.IsNullOrWhiteSpace(dto.Weight) && decimal.TryParse(dto.Weight, out var w)) record.Weight = w;
                 if (!string.IsNullOrWhiteSpace(dto.Height) && decimal.TryParse(dto.Height, out var h)) record.Height = h;
 
+                // Điều dưỡng đã đo và lưu chiều cao/cân nặng/BMI vào appointments.nurse_note (jsonb), nhưng form
+                // khám của bác sĩ (ExaminationForm) không gửi chiều cao lên — nên trước đây Height luôn null,
+                // BMI không bao giờ được tính và cột bmi của bệnh án để trống, khiến Phiếu Khám Bệnh in ra "BMI: —".
+                // Bổ sung phần còn thiếu từ bộ sinh hiệu điều dưỡng (không ghi đè giá trị bác sĩ đã nhập).
+                decimal? nurseBmi = null;
+                var nurseAppt = await _context.Appointments.AsNoTracking().FirstOrDefaultAsync(a => a.AppointmentId == dto.AppointmentId);
+                if (!string.IsNullOrWhiteSpace(nurseAppt?.NurseNote))
+                {
+                    try
+                    {
+                        using var nurseDoc = System.Text.Json.JsonDocument.Parse(nurseAppt.NurseNote);
+                        var nurseRoot = nurseDoc.RootElement;
+                        if (!record.Height.HasValue && nurseRoot.TryGetProperty("height", out var nhEl) && nhEl.TryGetDecimal(out var nh) && nh > 0) record.Height = nh;
+                        if (!record.Weight.HasValue && nurseRoot.TryGetProperty("weight", out var nwEl) && nwEl.TryGetDecimal(out var nw) && nw > 0) record.Weight = nw;
+                        if (nurseRoot.TryGetProperty("bmi", out var nbEl) && nbEl.TryGetDecimal(out var nb) && nb > 0) nurseBmi = nb;
+                    }
+                    catch (Exception nurseEx)
+                    {
+                        Console.WriteLine("CreateMedicalRecord: không đọc được nurse_note: " + nurseEx.Message);
+                    }
+                }
+
                 if (record.Weight.HasValue && record.Height.HasValue && record.Height.Value > 0)
                 {
                     decimal hMeter = record.Height.Value / 100m;
                     record.Bmi = Math.Round(record.Weight.Value / (hMeter * hMeter), 1);
+                }
+                else if (!record.Bmi.HasValue && nurseBmi.HasValue)
+                {
+                    record.Bmi = nurseBmi;
                 }
 
                 await _context.SaveChangesAsync();
