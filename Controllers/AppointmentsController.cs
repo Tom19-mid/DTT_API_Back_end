@@ -347,13 +347,13 @@ public class AppointmentsController : ControllerBase
                 PatientAge = respPatientAge,
                 Reason = dto.Reason,
                 DoctorId = validDoctorId,
-                DoctorName = !string.IsNullOrEmpty(dto.DoctorName) ? dto.DoctorName : doctor?.FullName ?? "BS. CK1 Nguyễn Văn A",
-                SpecialtyName = !string.IsNullOrEmpty(dto.SpecialtyName) ? dto.SpecialtyName : "Nội tổng quát",
+                DoctorName = !string.IsNullOrEmpty(dto.DoctorName) ? dto.DoctorName : doctor?.FullName ?? "Bác sĩ",
+                SpecialtyName = dto.SpecialtyName ?? "",
                 Date = !string.IsNullOrEmpty(dto.Date) ? dto.Date : DateTime.Now.ToString("dd/MM/yyyy"),
                 TimeSlot = !string.IsNullOrEmpty(dto.TimeSlot) ? dto.TimeSlot : "08:30 - 09:30",
                 Status = "Confirmed",
                 QueueNumber = finalQueueNum,
-                ClinicRoom = doctor?.ClinicRoom ?? "Phòng 101",
+                ClinicRoom = doctor?.ClinicRoom ?? "",
                 Fee = dto.Fee ?? "250.000đ",
                 CreatedAt = DateTime.UtcNow
             });
@@ -496,6 +496,12 @@ public class AppointmentsController : ControllerBase
                 // hiện hóa đơn ảo. Chặn ở đây, hướng đúng qua luồng hoàn tất khám thật.
                 if (dto.StatusId == 4)
                     return BadRequest(new { success = false, message = "Không thể đặt trực tiếp trạng thái 'Đã hoàn thành' — trạng thái này chỉ được set khi bác sĩ hoàn tất khám (tạo hồ sơ khám và hóa đơn)." });
+                // Cùng chốt chặn quy trình như PUT {id}/status: tài khoản KHÔNG phải Admin không được đẩy ca chưa Check-in / chưa
+                // qua Điều dưỡng (1/2/7) sang các bước của Bác sĩ/CLS/thanh toán — chỉ Admin (Web Admin) được sửa tay tự do.
+                bool isAdminCaller = User.FindFirst("role_id")?.Value == "1";
+                bool isPreNurseStage = appt.StatusId == 1 || appt.StatusId == 2 || appt.StatusId == 7;
+                if (!isAdminCaller && isPreNurseStage && dto.StatusId is 3 or 8 or 9 or 10 or 11)
+                    return BadRequest(new { success = false, message = "Không thể chuyển sang bước của Bác sĩ khi bệnh nhân chưa Check-in và chưa được Điều dưỡng đo sinh hiệu." });
                 appt.StatusId = dto.StatusId;
             }
 
@@ -658,6 +664,14 @@ public class AppointmentsController : ControllerBase
                 return BadRequest(new { success = false, message = "Lịch hẹn không ở trạng thái hợp lệ để Check-in." });
             }
 
+            // Chỉ Check-in được lịch hẹn của HÔM NAY (giờ VN). Trước đây không kiểm tra ngày: lịch hẹn ngày mai/ngày cũ vẫn
+            // Check-in được, nhưng mọi hàng chờ (Điều dưỡng/Bác sĩ) chỉ lấy lịch hẹn hôm nay → ca đó biến mất khỏi luồng khám.
+            var todayVn = DateOnly.FromDateTime(DateTime.UtcNow.AddHours(7));
+            if (appt.AppointmentDate.HasValue && appt.AppointmentDate.Value != todayVn)
+            {
+                return BadRequest(new { success = false, message = $"Lịch hẹn này thuộc ngày {appt.AppointmentDate.Value:dd/MM/yyyy}, không phải hôm nay ({todayVn:dd/MM/yyyy}) nên không thể Check-in." });
+            }
+
             // Đảm bảo appointment_statuses có status_id=7
             var hasCheckedIn = await _context.AppointmentStatuses.AnyAsync(s => s.StatusId == 7);
             if (!hasCheckedIn)
@@ -666,7 +680,7 @@ public class AppointmentsController : ControllerBase
                 await _context.SaveChangesAsync();
             }
 
-            appt.StatusId = 7; // CheckedIn → chuyển sang Hàng chờ lâm sàng của Bác sĩ
+            appt.StatusId = 7; // CheckedIn → chuyển sang Hàng chờ ĐIỀU DƯỠNG đo sinh hiệu (sau đó mới tới Bác sĩ)
             appt.UpdatedAt = DateTime.UtcNow;
 
             // Lấy thông tin bệnh nhân để gửi thông báo
@@ -689,7 +703,7 @@ public class AppointmentsController : ControllerBase
             return Ok(new
             {
                 success = true,
-                message = "Check-in thành công! Bệnh nhân đã được đưa vào Hàng chờ lâm sàng của Bác sĩ.",
+                message = "Check-in thành công! Bệnh nhân đã được đưa vào Hàng chờ đo sinh hiệu của Điều dưỡng.",
                 appointmentId = id,
                 status = "CheckedIn",
                 queueNumber = appt.QueueNumber
@@ -1086,7 +1100,7 @@ public class AppointmentsController : ControllerBase
                 PaymentStatus = invoiceMap.TryGetValue(appt.AppointmentId, out var apptInvoice) ? apptInvoice.PaymentStatus : "unpaid",
                 PaymentMethod = invoiceMap.TryGetValue(appt.AppointmentId, out var apptInvMethod) ? apptInvMethod.PaymentMethod : null,
                 QueueNumber = appt.QueueNumber,
-                ClinicRoom = isPkg ? "" : (doctor?.ClinicRoom ?? "Phòng 101"),
+                ClinicRoom = isPkg ? "" : (doctor?.ClinicRoom ?? ""),
                 Fee = feeStr,
                 IsPackage = isPkg,
                 CreatedAt = appt.CreatedAt,
@@ -1221,6 +1235,21 @@ public class AppointmentsController : ControllerBase
                 }
                 if (resolvedStatusId == null)
                     return BadRequest(new { success = false, message = $"Trạng thái '{status}' không hợp lệ." });
+
+                // Chốt chặn đúng quy trình lâm sàng: Lễ tân Check-in (7) → Điều dưỡng đo sinh hiệu (8, qua PUT nurse-vitals)
+                // → Bác sĩ khám (3) → ... Trước đây endpoint này nhận MỌI chuyển trạng thái, nên 1 ca chưa Check-in (1/2) hoặc
+                // mới Check-in chưa qua Điều dưỡng (7) vẫn bị đẩy thẳng sang WaitingForDoctor/InProgress/Completed... bỏ qua
+                // bước đo sinh hiệu (không có sinh hiệu nào được lưu). Admin (Web Admin sửa tay) vẫn được đổi tự do.
+                bool isAdminCaller = User.FindFirst("role_id")?.Value == "1";
+                bool isPreNurseStage = appt.StatusId == 1 || appt.StatusId == 2 || appt.StatusId == 7;
+                bool targetsClinicalStage = resolvedStatusId.Value is 3 or 4 or 8 or 9 or 10 or 11;
+                if (!isAdminCaller && isPreNurseStage && targetsClinicalStage)
+                {
+                    string why = appt.StatusId == 7
+                        ? "Bệnh nhân đã Check-in nhưng CHƯA được Điều dưỡng đo sinh hiệu — phải đo sinh hiệu (nút 'Đo sinh hiệu' ở màn Điều dưỡng) trước khi chuyển sang Bác sĩ khám."
+                        : "Bệnh nhân CHƯA Check-in tại Lễ Tân — phải Check-in → Điều dưỡng đo sinh hiệu → rồi mới đến Bác sĩ khám.";
+                    return BadRequest(new { success = false, message = $"Không thể chuyển sang trạng thái '{status}'. {why}" });
+                }
 
                 appt.StatusId = resolvedStatusId.Value;
 

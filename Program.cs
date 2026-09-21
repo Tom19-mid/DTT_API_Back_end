@@ -37,6 +37,9 @@ builder.Services.AddSingleton<DTT_Backend_API.Models.PaypalClient>(x =>
 );
 
 builder.Services.AddSingleton<IVnPayService, VnPayService>();
+
+// Tự đóng lịch hẹn của ngày trước còn kẹt ở trạng thái chưa tới bác sĩ (1/2/7/8) → NoShow — xem StaleAppointmentSweeper.
+builder.Services.AddHostedService<StaleAppointmentSweeper>();
 builder.Services.AddSignalR();
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen(options =>
@@ -201,23 +204,32 @@ app.UseSwaggerUI(c =>
 });
 
 
-// ── Auto-seed bắt buộc: Đảm bảo status_id=7 'CheckedIn' luôn tồn tại trong DB ──
+// ── Auto-seed bắt buộc: đảm bảo ĐỦ 11 trạng thái lịch hẹn (1-11) luôn tồn tại trong appointment_statuses ──
+// Trước đây mỗi controller tự seed một phần (Appointments: 1-11 chỉ khi bảng trống; HealthPackages: chỉ 1-8;
+// Program: chỉ 7; ClinicalOrders: chỉ 9 khi có chỉ định) → tùy controller nào chạy trước mà DB có thể thiếu
+// status 9/10/11 và các lệnh đổi trạng thái (FK appointments.status_id) sẽ lỗi. Chỉ THÊM dòng còn thiếu, không sửa/xóa dòng có sẵn.
 using (var scope = app.Services.CreateScope())
 {
     var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
     try
     {
-        var hasCheckedIn = db.AppointmentStatuses.Any(s => s.StatusId == 7);
-        if (!hasCheckedIn)
+        var requiredStatuses = new (int Id, string Name)[]
         {
-            db.AppointmentStatuses.Add(new DTT_Backend_API.Models.AppointmentStatus { StatusId = 7, StatusName = "CheckedIn" });
-            db.SaveChanges();
-            Console.WriteLine("[Seed] ✅ Đã thêm status_id=7 'CheckedIn' vào appointment_statuses.");
+            (1, "Scheduled"), (2, "Waiting"), (3, "InProgress"), (4, "Completed"), (5, "Cancelled"), (6, "NoShow"),
+            (7, "CheckedIn"), (8, "WaitingForDoctor"), (9, "AwaitingTestResults"), (10, "PendingDispensing"), (11, "PendingPayment")
+        };
+        var existingIds = db.AppointmentStatuses.Select(s => s.StatusId).ToHashSet();
+        foreach (var (id, name) in requiredStatuses)
+        {
+            if (existingIds.Contains(id)) continue;
+            db.AppointmentStatuses.Add(new DTT_Backend_API.Models.AppointmentStatus { StatusId = id, StatusName = name });
+            Console.WriteLine($"[Seed] ✅ Đã thêm status_id={id} '{name}' vào appointment_statuses.");
         }
+        db.SaveChanges();
     }
     catch (Exception ex)
     {
-        Console.WriteLine($"[Seed] ⚠️ Không thể seed CheckedIn status: {ex.Message}");
+        Console.WriteLine($"[Seed] ⚠️ Không thể seed appointment_statuses: {ex.Message}");
     }
 }
 

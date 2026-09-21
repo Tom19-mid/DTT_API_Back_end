@@ -52,7 +52,7 @@ public class AppointmentResponseDto
     public string PaymentStatus { get; set; } = "unpaid";
     public string? PaymentMethod { get; set; }
     public int QueueNumber { get; set; }
-    public string ClinicRoom { get; set; } = "Phòng 101";
+    public string ClinicRoom { get; set; } = string.Empty;
     public string Fee { get; set; } = "250.000đ";
     public bool IsPackage { get; set; } = false;
     public DateTime CreatedAt { get; set; }

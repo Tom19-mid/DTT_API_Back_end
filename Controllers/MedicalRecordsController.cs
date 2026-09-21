@@ -321,7 +321,7 @@ namespace DTT_Backend_API.Controllers
                     var rxItems = details.Select(d => new
                     {
                         name = $"{d.MedicineNameSnapshot} - SL: {d.Quantity} {d.UnitSnapshot}",
-                        usage = $"Liều: {d.Dosage}, {d.Frequency}. {d.UsageInstruction}".Trim()
+                        usage = BuildUsage(d)
                     }).ToList();
 
                     return new
@@ -373,10 +373,10 @@ namespace DTT_Backend_API.Controllers
                     var rxItems = details.Select(d => new
                     {
                         name = $"{d.MedicineNameSnapshot} ({d.Quantity} {d.UnitSnapshot})",
-                        usage = $"Liều: {d.Dosage}, {d.Frequency}. {d.UsageInstruction}".Trim()
+                        usage = BuildUsage(d)
                     }).ToList();
 
-                    string dispensedBy = "DS. Trịnh Mai Phương";
+                    string dispensedBy = "Dược sĩ"; // không gán tên dược sĩ cụ thể khi chưa có ghi nhận phát thuốc
                     string pharmacistNote = "";
                     if (!string.IsNullOrEmpty(rx.Note))
                     {
@@ -738,7 +738,8 @@ namespace DTT_Backend_API.Controllers
                             Quantity = pItem.Quantity,
                             Dosage = pItem.Dosage,
                             Frequency = pItem.Frequency,
-                            Duration = "7 ngày",
+                            // Form khám không có ô "số ngày dùng" — không tự bịa "7 ngày" (DB yêu cầu NOT NULL nên ghi "Theo chỉ định").
+                            Duration = "Theo chỉ định",
                             UsageInstruction = pItem.UsageInstruction
                         });
 
@@ -893,7 +894,7 @@ namespace DTT_Backend_API.Controllers
                     string pName = pInfo?.FullName ?? "Bệnh nhân";
                     int age = pInfo?.DateOfBirth.HasValue == true ? DateTime.Today.Year - pInfo.DateOfBirth.Value.Year : 30;
                     string gender = pInfo?.Gender ?? "Nam";
-                    string dName = docMap.ContainsKey(appt.DoctorId) ? docMap[appt.DoctorId] : "BS. Nguyễn Văn A";
+                    string dName = docMap.ContainsKey(appt.DoctorId) ? docMap[appt.DoctorId] : "Bác sĩ";
                     string dDegree = docDegreeMap.ContainsKey(appt.DoctorId) ? docDegreeMap[appt.DoctorId] : "Bác sĩ";
 
                     var drugItems = details.Select(d =>
@@ -1034,12 +1035,12 @@ namespace DTT_Backend_API.Controllers
                     string pInsurance = pInfo?.HealthInsuranceNumber ?? "";
                     int age = pInfo?.DateOfBirth.HasValue == true ? DateTime.Today.Year - pInfo.DateOfBirth.Value.Year : 30;
                     string gender = pInfo?.Gender ?? "Nam";
-                    string dName = docMap.ContainsKey(rx.DoctorId) ? docMap[rx.DoctorId] : "BS. Nguyễn Văn A";
+                    string dName = docMap.ContainsKey(rx.DoctorId) ? docMap[rx.DoctorId] : "Bác sĩ";
                     string dDegree = docDegreeMap.ContainsKey(rx.DoctorId) ? docDegreeMap[rx.DoctorId] : "Bác sĩ";
                     string summary = string.Join(", ", details.Select(d => $"{d.MedicineNameSnapshot} ({d.Quantity} {d.UnitSnapshot})"));
                     string rxCode = $"RX-2026-{rx.PrescriptionId:D4}";
 
-                    string dispensedBy = "DS. Trịnh Mai Phương";
+                    string dispensedBy = "Dược sĩ"; // không gán tên dược sĩ cụ thể khi chưa có ghi nhận phát thuốc
                     if (!string.IsNullOrEmpty(rx.Note))
                     {
                         var m = System.Text.RegularExpressions.Regex.Match(rx.Note, @"\[(?:Đã phát bởi\s+|Đã cấp phát bởi\s+|Dược sĩ ghi chú:\s+|Dược sĩ:\s+|Dược sĩ\s+)?([^\]:]+)\]");
@@ -1136,6 +1137,20 @@ namespace DTT_Backend_API.Controllers
     // POST /api/MedicalRecords/{appointmentId}/dispense
     // [StaffOnly] — trước đây không kiểm tra quyền, bất kỳ ai đăng nhập cũng đánh dấu "đã phát thuốc"
     // được cho bất kỳ lịch hẹn nào (kể cả chưa thực sự phát), sai lệch tồn kho/trách nhiệm Dược sĩ.
+        // Chuỗi cách dùng thuốc hiển thị cho bệnh nhân: chỉ ghép liều/tần suất khi có giá trị THẬT; "Theo chỉ định" chỉ là
+        // giá trị giữ chỗ (DB bắt buộc NOT NULL) nên không in ra dạng "Liều: Theo chỉ định, Theo chỉ định."
+        private static string BuildUsage(PrescriptionDetail d)
+        {
+            static bool IsReal(string? s) => !string.IsNullOrWhiteSpace(s)
+                && !s.Trim().Equals("Theo chỉ định", StringComparison.OrdinalIgnoreCase)
+                && !s.Trim().Equals("Default", StringComparison.OrdinalIgnoreCase);
+
+            var dose = new[] { d.Dosage, d.Frequency }.Where(IsReal).Select(x => x.Trim()).ToList();
+            string instruction = d.UsageInstruction?.Trim() ?? "";
+            if (dose.Count == 0) return string.IsNullOrEmpty(instruction) ? "Theo chỉ định của bác sĩ" : instruction;
+            return $"Liều: {string.Join(", ", dose)}. {instruction}".Trim();
+        }
+
         [HttpPost("{appointmentId}/dispense")]
         [StaffOnly]
         public async Task<IActionResult> DispensePrescription(int appointmentId, [FromBody] DispenseDto dto)
@@ -1171,7 +1186,7 @@ namespace DTT_Backend_API.Controllers
 
                 string pName = !string.IsNullOrWhiteSpace(dto?.PharmacistName)
                     ? dto.PharmacistName.Trim()
-                    : "DS. Trịnh Mai Phương";
+                    : "Dược sĩ";
 
                 foreach (var rx in rxList)
                 {
@@ -1357,11 +1372,13 @@ namespace DTT_Backend_API.Controllers
     {
         public int MedicineId { get; set; }
         public string MedicineName { get; set; } = string.Empty;
-        public string Unit { get; set; } = "Viên";
-        public int Quantity { get; set; } = 10;
-        public string Dosage { get; set; } = "500mg";
-        public string Frequency { get; set; } = "2 lần/ngày";
-        public string UsageInstruction { get; set; } = "Uống sau ăn 30 phút";
+        // Không có giá trị mẫu (trước đây "Viên", 10, "500mg", "2 lần/ngày", "Uống sau ăn 30 phút" được tự điền khi client
+        // không gửi → lưu vào đơn thuốc như thể bác sĩ đã kê). DB bắt buộc dosage/frequency NOT NULL → "Theo chỉ định".
+        public string Unit { get; set; } = string.Empty;
+        public int Quantity { get; set; }
+        public string Dosage { get; set; } = "Theo chỉ định";
+        public string Frequency { get; set; } = "Theo chỉ định";
+        public string UsageInstruction { get; set; } = string.Empty;
     }
 
     public class DispenseDto

@@ -288,7 +288,7 @@ public class Doctor
     public string? AvatarUrl { get; set; }
 
     [Column("rating")]
-    public decimal Rating { get; set; } = 5.0m;
+    public decimal Rating { get; set; } = 0m; // chưa có đánh giá → 0 (trước đây mặc định 5.0 sao)
 
     [Column("review_count")]
     public int ReviewCount { get; set; } = 0;

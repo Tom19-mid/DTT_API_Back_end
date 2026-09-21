@@ -195,14 +195,18 @@ public class ClinicalOrdersController : ControllerBase
             var patientMap = await _context.Patients.ToDictionaryAsync(p => p.PatientId, p => p);
             var doctorMap = await _context.Doctors.ToDictionaryAsync(d => d.DoctorId, d => d.FullName ?? "Bác sĩ");
             var records = await _context.MedicalRecords.ToDictionaryAsync(r => r.MedicalRecordId, r => r);
-            var today = DateTime.UtcNow.Date;
+            // "Hôm nay" theo giờ VN (UTC+7) — trước đây dùng UtcNow.Date nên từ 00:00 đến 07:00 sáng VN,
+            // danh sách "Đã thực hiện hôm nay" vẫn hiện kết quả của NGÀY HÔM QUA (và bỏ sót ca vừa làm sau 00:00).
+            // performed_at lưu bằng UtcNow → so sánh theo khoảng [00:00 VN, 24:00 VN) đổi sang UTC, giống AppointmentsController.
+            var todayStartUtc = DateTime.UtcNow.AddHours(7).Date.AddHours(-7);
+            var todayEndUtc = todayStartUtc.AddDays(1);
 
             var result = new List<ClinicalOrderItemDto>();
 
             if (string.IsNullOrEmpty(type) || type == "Test")
             {
                 var testsQuery = done
-                    ? _context.MedicalTests.Where(t => t.ResultStatus != "Pending" && t.PerformedAt != null && t.PerformedAt.Value.Date == today)
+                    ? _context.MedicalTests.Where(t => t.ResultStatus != "Pending" && t.PerformedAt != null && t.PerformedAt >= todayStartUtc && t.PerformedAt < todayEndUtc)
                     : _context.MedicalTests.Where(t => t.ResultStatus == "Pending");
                 var tests = await testsQuery.ToListAsync();
                 foreach (var t in tests)
@@ -216,7 +220,7 @@ public class ClinicalOrdersController : ControllerBase
             if (string.IsNullOrEmpty(type) || type == "Ultrasound")
             {
                 var ulsQuery = done
-                    ? _context.UltrasoundResults.Where(u => u.ResultStatus == "Completed" && u.PerformedAt != null && u.PerformedAt.Value.Date == today)
+                    ? _context.UltrasoundResults.Where(u => u.ResultStatus == "Completed" && u.PerformedAt != null && u.PerformedAt >= todayStartUtc && u.PerformedAt < todayEndUtc)
                     : _context.UltrasoundResults.Where(u => u.ResultStatus == "Pending");
                 var uls = await ulsQuery.ToListAsync();
                 foreach (var u in uls)
@@ -304,7 +308,7 @@ public class ClinicalOrdersController : ControllerBase
             PatientName = patient?.FullName ?? "Bệnh nhân",
             PatientAge = age,
             PatientGender = patient?.Gender ?? "",
-            DoctorName = doctorMap.TryGetValue(rec.DoctorId, out var dName) ? dName : "BS. Nguyễn Văn A",
+            DoctorName = doctorMap.TryGetValue(rec.DoctorId, out var dName) ? dName : "Bác sĩ",
             ServiceName = serviceName,
             Status = "Pending",
             IsUrgent = isUrgent,

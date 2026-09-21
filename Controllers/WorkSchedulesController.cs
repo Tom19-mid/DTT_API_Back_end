@@ -95,7 +95,7 @@ public class WorkSchedulesController : ControllerBase
                     int schId = reader.GetInt32(0);
                     int docId = reader.GetInt32(1);
                     string docName = reader.IsDBNull(2) ? "Bác sĩ DTT" : reader.GetString(2);
-                    string? specName = reader.IsDBNull(6) ? "Nội tổng quát" : reader.GetString(6);
+                    string? specName = reader.IsDBNull(6) ? "" : reader.GetString(6);
 
                     DateTime wDate = reader.GetDateTime(7);
                     /* Old code comment:

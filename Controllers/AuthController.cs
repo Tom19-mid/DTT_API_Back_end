@@ -160,9 +160,6 @@ public class AuthController : ControllerBase
             {
                 UserId = user.UserId,
                 FullName = "BS. Điều trị",
-                Degree = "Bác sĩ Chuyên khoa",
-                ExperienceYears = 5,
-                ClinicRoom = "Phòng 101",
                 SpecialtyId = 1,
                 Status = "Active"
             };
@@ -191,7 +188,7 @@ public class AuthController : ControllerBase
             Degree = doctor?.Degree ?? roleName,
             ClinicRoom = doctor?.ClinicRoom ?? "Quầy làm việc",
             SpecialtyId = doctor?.SpecialtyId ?? (user.RoleId == 2 ? 1 : 0),
-            SpecialtyName = specialty?.SpecialtyName ?? (user.RoleId == 2 ? "Nội tổng quát" : string.Empty),
+            SpecialtyName = specialty?.SpecialtyName ?? string.Empty,
             Phone = user.PhoneNumber,
             Email = user.Email
         });

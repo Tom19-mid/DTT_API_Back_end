@@ -267,12 +267,9 @@ public class UsersController : ControllerBase
                     {
                         UserId = newUser.UserId,
                         FullName = dto.FullName,
-                        Degree = "Bác sĩ Chuyên khoa",
-                        ExperienceYears = 5,
-                        ClinicRoom = "Phòng 101",
                         SpecialtyId = 1,
                         Status = newUser.Status ?? "Active",
-                        Rating = 5.0m,
+                        Rating = 0m, // chưa có đánh giá thật nào — không mặc định 5 sao
                         ReviewCount = 0
                     });
                 }

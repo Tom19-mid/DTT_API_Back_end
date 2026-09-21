@@ -494,6 +494,45 @@ public class ChatController : ControllerBase
         }
     }
 
+    // POST /api/chat/staff/sessions/{id}/release — Trả phiên đã tiếp nhận VỀ HÀNG CHỜ chung.
+    // Vấn đề: mở dialog là tự Claim (gán assigned_staff_id) nên chỉ cần bấm nhầm/xem thử rồi đóng cửa sổ, phiên đã bị gán cho
+    // lễ tân đó — biến mất khỏi hàng chờ chung và các lễ tân khác không còn thấy/nhận được nữa dù bệnh nhân vẫn chờ.
+    // Chỉ cho trả về khi lễ tân CHƯA trả lời bệnh nhân (chỉ có duy nhất câu chào tự động do Claim sinh ra); đã trả lời rồi
+    // thì phiên thuộc về người đó cho tới khi đóng (họ tìm lại ở "Phiên tư vấn dở dang").
+    [HttpPost("staff/sessions/{id}/release")]
+    [StaffOnly]
+    public async Task<IActionResult> ReleaseSession(int id)
+    {
+        try
+        {
+            var userId = GetCurrentUserId();
+            if (userId == null) return StatusCode(403, new { success = false, message = "Không xác định được người dùng." });
+
+            var session = await _context.ChatSessions.FirstOrDefaultAsync(s => s.SessionId == id);
+            if (session == null) return NotFound(new { success = false, message = "Không tìm thấy phiên chat." });
+            if (session.Status != "Escalated")
+                return BadRequest(new { success = false, message = "Phiên không ở trạng thái tư vấn trực tiếp." });
+            if (session.AssignedStaffId == null)
+                return Ok(new { success = true, released = false, message = "Phiên đang ở hàng chờ." }); // idempotent
+            if (session.AssignedStaffId != userId.Value)
+                return StatusCode(403, new { success = false, message = "Bạn chưa tiếp nhận phiên chat này." });
+
+            int staffMessageCount = await _context.ChatMessages.CountAsync(m => m.SessionId == id && m.SenderType == "Staff");
+            if (staffMessageCount > 1)
+                return BadRequest(new { success = false, message = "Bạn đã trả lời bệnh nhân trong phiên này nên không thể trả về hàng chờ — hãy đóng phiên khi tư vấn xong." });
+
+            // Giữ nguyên UpdatedAt để phiên vẫn đứng đúng thứ tự cũ trong hàng chờ (không bị đẩy xuống cuối).
+            session.AssignedStaffId = null;
+            await _context.SaveChangesAsync();
+
+            return Ok(new { success = true, released = true });
+        }
+        catch (Exception ex)
+        {
+            return StatusCode(500, new { success = false, message = GetErrorDetail(ex) });
+        }
+    }
+
     // POST /api/chat/sessions/{id}/close — Lễ tân đóng phiên sau khi tư vấn xong.
     [HttpPost("sessions/{id}/close")]
     [StaffOnly]

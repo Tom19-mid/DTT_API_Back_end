@@ -174,7 +174,7 @@ public class DoctorLeavesController : ControllerBase
                 User? user = null;
                 if (doctor != null) usersDict.TryGetValue(doctor.UserId, out user);
 
-                string specName = "Nội tổng quát";
+                string specName = "";
                 if (doctor?.SpecialtyId != null && specialtiesDict.TryGetValue(doctor.SpecialtyId.Value, out var sName))
                 {
                     specName = sName;
